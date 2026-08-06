@@ -12,6 +12,69 @@
  */
 
 /**
+ * Turn individually logged shifts into the stretches tips get split across.
+ *
+ * Each person reports only their own in/out. Everyone's boundaries are pooled,
+ * sorted, and the day is cut at every one of them. Between any two adjacent
+ * boundaries the crew is constant, so that window is a stretch and whoever was
+ * present shares its tips.
+ *
+ * This is why nobody has to know anyone else's hours. A five-minute overlap
+ * falls out of the arithmetic rather than requiring someone to notice it.
+ *
+ * @param {Array} shifts [{ person, startMinutes, endMinutes }, ...]
+ * @returns {Array} [{ startMinutes, endMinutes, people[] }, ...]
+ */
+function buildStretches(shifts) {
+  if (!shifts || !shifts.length) return [];
+
+  var points = [];
+  shifts.forEach(function (s) {
+    if (points.indexOf(s.startMinutes) === -1) points.push(s.startMinutes);
+    if (points.indexOf(s.endMinutes) === -1) points.push(s.endMinutes);
+  });
+  points.sort(function (a, b) { return a - b; });
+
+  var stretches = [];
+
+  for (var i = 0; i < points.length - 1; i++) {
+    var from = points[i];
+    var to = points[i + 1];
+
+    var people = [];
+    shifts.forEach(function (s) {
+      if (s.startMinutes <= from && s.endMinutes >= to) {
+        if (people.indexOf(s.person) === -1) people.push(s.person);
+      }
+    });
+
+    // A window nobody covered is a genuine gap in the day. Dropping it means
+    // any tips inside it come back as unassigned and get flagged, rather than
+    // being handed to whoever worked nearby.
+    if (people.length) {
+      stretches.push({ startMinutes: from, endMinutes: to, people: people });
+    }
+  }
+
+  return stretches;
+}
+
+/**
+ * Someone logging themselves twice for one day would count double in every
+ * overlapping window. Real, and worth flagging rather than silently paying.
+ */
+function findDuplicatePeople(shifts) {
+  var seen = {}, dupes = [];
+  shifts.forEach(function (s) {
+    if (seen[s.person]) {
+      if (dupes.indexOf(s.person) === -1) dupes.push(s.person);
+    }
+    seen[s.person] = true;
+  });
+  return dupes;
+}
+
+/**
  * Split one stretch's tips evenly, truncating to the cent, then handing out
  * the orphan pennies deterministically so the total reconciles exactly.
  */
@@ -62,21 +125,10 @@ function assignTips(stretches, tips) {
 }
 
 /**
- * Two crews cannot both own the same minute of tips. Overlapping stretches
- * are a logging mistake, not something to average out.
+ * Full day: individually logged shifts + timestamped tips -> { name: cents }.
  */
-function findOverlaps(stretches) {
-  var sorted = stretches.slice().sort(function (a, b) { return a.startMinutes - b.startMinutes; });
-  var problems = [];
-  for (var i = 1; i < sorted.length; i++) {
-    if (sorted[i].startMinutes < sorted[i - 1].endMinutes) {
-      problems.push({ first: sorted[i - 1], second: sorted[i] });
-    }
-  }
-  return problems;
-}
-
-function computeDay(stretches, tips, rotation) {
+function computeDay(shifts, tips, rotation) {
+  var stretches = buildStretches(shifts);
   var assigned = assignTips(stretches, tips);
   var totals = {};
 
@@ -127,5 +179,5 @@ function sumCents(totals) {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { splitPool, assignTips, findOverlaps, computeDay, applyOverrides, sumCents };
+  module.exports = { splitPool, buildStretches, findDuplicatePeople, assignTips, computeDay, applyOverrides, sumCents };
 }

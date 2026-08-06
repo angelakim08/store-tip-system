@@ -7,7 +7,7 @@
  * Config tab, never in this repository.
  */
 
-const { splitPool, assignTips, findOverlaps, computeDay, applyOverrides, sumCents } = require('./splitLogic');
+const { splitPool, buildStretches, findDuplicatePeople, assignTips, computeDay, applyOverrides, sumCents } = require('./splitLogic');
 
 const A = 'Employee A';
 const B = 'Employee B';
@@ -48,8 +48,8 @@ check('rotation moves the odd penny',
 console.log('\n--- A works 2-9, B joins at 5:30 ---');
 const day = computeDay(
   [
-    { startMinutes: hm(14), endMinutes: hm(17, 30), people: [A] },
-    { startMinutes: hm(17, 30), endMinutes: hm(21), people: [A, B] },
+    { person: A, startMinutes: hm(14), endMinutes: hm(21) },
+    { person: B, startMinutes: hm(17, 30), endMinutes: hm(21) },
   ],
   [
     { minutes: hm(15, 12), cents: 300 },
@@ -64,8 +64,8 @@ check('nothing unassigned', day.unassigned.length, 0);
 console.log('\n--- a tip exactly at handoff goes to the incoming crew ---');
 const edge = computeDay(
   [
-    { startMinutes: hm(14), endMinutes: hm(17, 30), people: [A] },
-    { startMinutes: hm(17, 30), endMinutes: hm(21), people: [A, B] },
+    { person: A, startMinutes: hm(14), endMinutes: hm(21) },
+    { person: B, startMinutes: hm(17, 30), endMinutes: hm(21) },
   ],
   [{ minutes: hm(17, 30), cents: 1000 }], 0);
 check('5:30 tip is split, not solo', edge.totals, { [A]: 500, [B]: 500 });
@@ -73,9 +73,9 @@ check('5:30 tip is split, not solo', edge.totals, { [A]: 500, [B]: 500 });
 console.log('\n--- three stretches in one day ---');
 const summer = computeDay(
   [
-    { startMinutes: hm(11), endMinutes: hm(14), people: [C] },
-    { startMinutes: hm(14), endMinutes: hm(17), people: [A] },
-    { startMinutes: hm(17), endMinutes: hm(21), people: [A, D] },
+    { person: C, startMinutes: hm(11), endMinutes: hm(14) },
+    { person: A, startMinutes: hm(14), endMinutes: hm(21) },
+    { person: D, startMinutes: hm(17), endMinutes: hm(21) },
   ],
   [
     { minutes: hm(12), cents: 2000 },
@@ -87,13 +87,14 @@ check('three stretches allocate correctly', summer.totals,
 
 console.log('\n--- one stretch, two people ---');
 check('even split', computeDay(
-  [{ startMinutes: hm(17, 30), endMinutes: hm(21), people: [A, B] }],
+  [{ person: A, startMinutes: hm(17, 30), endMinutes: hm(21) },
+   { person: B, startMinutes: hm(17, 30), endMinutes: hm(21) }],
   [{ minutes: hm(19), cents: 6000 }], 0).totals,
   { [A]: 3000, [B]: 3000 });
 
 console.log('\n--- a missing stretch shows up as unassigned money ---');
 const gap = computeDay(
-  [{ startMinutes: hm(17), endMinutes: hm(21), people: [A] }],
+  [{ person: A, startMinutes: hm(17), endMinutes: hm(21) }],
   [
     { minutes: hm(12), cents: 2500 },
     { minutes: hm(19), cents: 1000 },
@@ -101,15 +102,31 @@ const gap = computeDay(
 check('morning tips are not silently absorbed', gap.unassigned.length, 1);
 check('and not paid to the wrong person', gap.totals, { [A]: 1000 });
 
-console.log('\n--- overlapping stretches are caught ---');
-check('overlap detected', findOverlaps([
-  { startMinutes: hm(14), endMinutes: hm(18), people: [A] },
-  { startMinutes: hm(17), endMinutes: hm(21), people: [B] },
-]).length, 1);
-check('clean handoff is not flagged', findOverlaps([
-  { startMinutes: hm(14), endMinutes: hm(17), people: [A] },
-  { startMinutes: hm(17), endMinutes: hm(21), people: [B] },
-]).length, 0);
+console.log('\n--- overlaps are derived, not reported ---');
+// A works 2:00-5:45, B arrives 5:40, C arrives 5:45. Nobody coordinated.
+const derived = buildStretches([
+  { person: A, startMinutes: hm(14), endMinutes: hm(17, 45) },
+  { person: B, startMinutes: hm(17, 40), endMinutes: hm(21) },
+  { person: C, startMinutes: hm(17, 45), endMinutes: hm(21) },
+]);
+check('three stretches derived', derived.length, 3);
+check('the 5-minute overlap is found', derived[1].people.sort(), [A, B]);
+check('and the last crew is right', derived[2].people.sort(), [B, C]);
+
+check('a gap nobody covered is dropped', buildStretches([
+  { person: A, startMinutes: hm(11), endMinutes: hm(13) },
+  { person: B, startMinutes: hm(17), endMinutes: hm(21) },
+]).length, 2);
+
+console.log('\n--- someone logging twice is caught ---');
+check('duplicate found', findDuplicatePeople([
+  { person: A, startMinutes: hm(14), endMinutes: hm(17) },
+  { person: A, startMinutes: hm(14), endMinutes: hm(17) },
+]), [A]);
+check('two different people are fine', findDuplicatePeople([
+  { person: A, startMinutes: hm(14), endMinutes: hm(17) },
+  { person: B, startMinutes: hm(14), endMinutes: hm(17) },
+]), []);
 
 console.log('\n--- tips outside every stretch are never absorbed ---');
 const stray = assignTips(

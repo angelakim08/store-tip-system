@@ -33,12 +33,12 @@ B is the expensive one. A is the visible one. This solves both; B is the busines
 
 ## 3. Rules (locked)
 
-1. **Pooling** — tips pool per *stretch* and split evenly among whoever worked it. A stretch is a continuous run with one crew. Not hours-proportional.
+1. **Pooling** — tips pool per *stretch* and split evenly among whoever was present. A stretch is a window between two adjacent shift boundaries, derived from individually logged in/out times. Not hours-proportional.
 2. **Matching** — each Square tip belongs to the stretch containing its timestamp. Windows are half-open `[start, end)`, so a tip at exactly 5:30 goes to the incoming crew and a handoff can never double-count.
 3. **Rounding** — truncate to the cent; orphan pennies allocated one per person, rotating by day-of-year. Daily payout must reconcile to what Square collected.
-4. **Missing data** — never assume. Tips with no matching stretch are flagged as unassigned, never absorbed into a neighbouring pool.
+4. **Missing data** — never assume. Tips with no matching stretch are flagged as unassigned, never absorbed into a neighbouring pool. Someone logging twice in a day is flagged, since they would otherwise count double.
 5. **Owner** — in the pool only when working. May *reduce* his share; the freed amount redistributes so the total still reconciles. An override can never increase a share.
-6. **Shift count is never assumed** — one stretch or six, same code path. No "shift 1" / "shift 2" anywhere.
+6. **Shift count is never assumed** — one person or six, same code path. No "shift 1" / "shift 2" anywhere. Overlaps are derived, not reported.
 
 ---
 
@@ -71,16 +71,44 @@ Lives in the **shop's** Google account. Runs on Google's servers. No laptop, no 
 | # | Field | Type | Notes |
 |---|---|---|---|
 | 1 | Business date | Date | Defaults to today |
-| 2 | Your stretch started at | Time | When this crew took over |
-| 3 | Your stretch ended at | Time | When you handed off or closed |
-| 4 | Who worked this stretch | Checkboxes | Roster. Check everyone, including yourself |
+| 2 | Your name | Dropdown | Roster — guarantees spelling matches Config |
+| 3 | Your shift started at | Time | When *you* arrived |
+| 4 | Your shift ended at | Time | When *you* left |
 | 5 | Notes | Paragraph, optional | Anything unusual |
 
-**No money field. On purpose.**
+**No money field. No "who else worked" field. On purpose.**
 
 Turn on **Settings → Collect email addresses** so every entry is traceable.
 
-**Who fills it:** whoever counts down / hands off, at the end of their stretch. When two people leave together, whichever of them closes out the register submits. One submission per stretch — never two.
+**Who fills it:** every person, once per shift, for themselves only. Nobody needs to know anyone else's hours.
+
+### Why individual logging
+Each person reports only their own in/out — the one thing they know exactly. All boundaries across the day are pooled and sorted, and the day is cut at every one. Between two adjacent boundaries the crew is constant, so that window is a stretch.
+
+A five-minute overlap falls out of the arithmetic instead of needing someone to notice it:
+
+| Logged | | |
+|---|---|---|
+| Employee A | 2:00 PM | 5:45 PM |
+| Employee B | 5:40 PM | 9:00 PM |
+| Employee C | 5:45 PM | 9:00 PM |
+
+| Derived stretch | Crew |
+|---|---|
+| 2:00 – 5:40 | A |
+| 5:40 – 5:45 | A, B |
+| 5:45 – 9:00 | B, C |
+
+Three properties this buys:
+- **No coordination.** Nobody reports on anyone else.
+- **No "who submits?" ambiguity.** Everyone submits for themselves.
+- **Incentive alignment.** Forgetting to log costs *you* money, not a coworker.
+
+### Time entry
+Times use the native picker, not a dropdown. A 5-minute dropdown would be 145 options — unusable on a phone, and scrolling past your time is a more frequent error than the one it prevents.
+
+AM/PM mistakes are caught instead by `EARLIEST_START`, `LATEST_END`, and `MAX_SHIFT_MINUTES` in Code.gs. Set these to the shop's real hours with about an hour of slack; the tighter they are, the more slips get caught. Anything that still gets through surfaces as unassigned tips.
+
 
 ---
 
@@ -102,8 +130,10 @@ Zero and blank tips are ignored, which will be most rows. Extra columns to the r
 
 | Cell | Contents |
 |---|---|
-| B2 | Any known pay-period start date |
+| B2 | Pay period type (semi-monthly: 1st–15th, 16th–EOM) |
 | B3 | Alert email for flags |
+
+Pay periods are semi-monthly (the 15th and the last day of the month), not biweekly. This is fixed in code, not configurable.
 
 Then a roster table starting at **row 6**:
 

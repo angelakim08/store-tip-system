@@ -13,7 +13,7 @@ A retail dessert shop distributed online (card) tips through an entirely manual 
 1. At close, staff read the tip total off the POS, split it by hand among whoever worked, and wrote the result on paper.
 2. Every two weeks, the owner re-aggregated weeks of those paper slips per person and keyed the totals into payroll.
 
-Two costs, and the second is bigger. The per-shift arithmetic took a few minutes but was error-prone — especially with overlapping shifts, where one person's tips spanned two different crews. The payroll aggregation was slow, unauditable, and produced mistakes that only surfaced as wrong paychecks.
+Two costs, and the second is bigger than the first. The per-shift arithmetic took a few minutes but was error-prone — especially with overlapping shifts, where one person's tips spanned two different crews. The payroll aggregation was slow, unauditable, and produced mistakes that only surfaced as wrong paychecks.
 
 Interviews surfaced something that changed the design: **the pain staff reported (shift math) sat downstream of the actual bottleneck (payroll aggregation).** The system targets both, but the business case is the second.
 
@@ -25,26 +25,27 @@ The key realization was that no human needs to enter a dollar amount at all.
 
 > The POS already knows **how much** and **when**. The only thing it doesn't know is **who was working**.
 
-So the system collects only that. Staff fill in a five-question form at the end of each shift — date, start time, end time, who worked, notes. No money. No math.
+So the system collects only that. Each person fills in a five-question form for their own shift — date, name, start, end, notes. No money, no math, and no reporting on anyone else.
 
-**Inputs:**
-
-| Source | Provides | Cost |
-|---|---|---|
-| Google Form | Who worked, from when to when | ~15 sec per shift |
-| POS export | How much, and when | Pasted twice a month |
-
-Apps Script matches each timestamped tip to the shift window containing it, then splits that pool evenly among the logged crew.
-
-**Outputs:**
-
-| Tab | Purpose |
-|---|---|
-| Daily Splits | Audit trail, per person per day |
-| Payroll Summary | The page the owner opens on payday |
-| Flags | Anything that needs a human |
+Overlaps are then **derived rather than reported**. Every logged boundary across the day is pooled and sorted, and the day is cut at each one; between two adjacent boundaries the crew is constant. A coworker arriving five minutes before another falls out of the arithmetic instead of requiring someone to notice it — which matters in a workplace where start times flex.
 
 This removed the single largest error source — a tired person doing arithmetic at 9pm — rather than automating around it.
+
+```
+Google Form (~15s per shift)              POS export
+   who worked, from when to when          how much, when
+            |                                   |
+            v                                   v
+     Form Responses tab                  Square Tips tab
+              \                              /
+               \_______  Apps Script  ______/
+                  matched by timestamp
+                          |
+        +-----------------+------------------+
+        v                 v                  v
+   Daily Splits    Payroll Summary         Flags
+   (audit trail)   (used on payday)   (needs a human)
+```
 
 ---
 
@@ -60,9 +61,11 @@ Python is used separately, for historical backfill analysis — recomputing past
 
 ## Design decisions
 
-**Integer cents, never floats.** `0.1 + 0.2` evaluates to `0.30000000000000004` in JavaScript. That belongs nowhere near payroll.
+**Integer cents, never floats.** `0.1 + 0.2 === 0.30000000000000004` in JavaScript. That belongs nowhere near payroll.
 
-**Half-open shift windows.** A tip at exactly the handoff minute goes to the incoming crew, so a handoff can never double-count.
+**Half-open shift windows `[start, end)`.** A tip at exactly a boundary goes to the incoming crew, so a handoff can never double-count.
+
+**Individual logging over crew logging.** An earlier design had one person record the whole crew at each handoff. Switching to per-person in/out removed the coordination problem, eliminated the "who submits?" ambiguity, and aligned the incentive — forgetting to log now costs the person who forgot rather than a coworker.
 
 **Deterministic penny allocation.** $47.00 split three ways is $15.6666. Truncating alone loses two cents and the payout stops reconciling. Leftover cents are allocated one per person, rotating by day-of-year so it evens out over time.
 
@@ -78,9 +81,11 @@ Python is used separately, for historical backfill analysis — recomputing past
 
 ## Validation
 
-Run `node test.js`.
+```bash
+node test.js
+```
 
-20 unit tests covering penny reconciliation, mid-shift handoffs, tips landing exactly on a boundary, three-stretch days, unlogged shifts surfacing as unassigned money, overlapping shift detection, voluntary share reductions, and input guardrails.
+24 unit tests covering penny reconciliation, derived overlaps from individually logged shifts, tips landing exactly on a boundary, multi-stretch days, unlogged shifts surfacing as unassigned money, duplicate-entry detection, uncovered gaps, voluntary share reductions, and input guardrails.
 
 `splitLogic.js` holds the pure logic so it can be tested outside Google; `Code.gs` mirrors it. Change one, change both.
 
@@ -105,10 +110,9 @@ Run `node test.js`.
 
 **Write the scope statement first.** The original design assumed staff were counting a physical cash jar, and the form had a field for typing a dollar amount. That was wrong — the tips in question were card tips already timestamped in the POS. Catching it meant rebuilding the data model, the form, and the test suite. A single paragraph defining what was in and out of scope, written on day one and shown to someone who knew the business, would have caught it in an hour.
 
-**Locate columns by header, not position.** The first version read form responses by column index. That broke immediately when email collection was switched on and shifted every column one to the right — silently, producing wrong numbers rather than an error. Matching on header text should have been the original design, not the fix. It is barely more code and it survives reordering, added questions, and renamed fields.
+**Locate columns by header, not position.** The first version read the form responses by column index. That broke immediately when email collection was switched on and shifted every column one to the right — silently, producing wrong numbers rather than an error. Matching on header text should have been the original design, not the fix. It's barely more code and it survives reordering, added questions, and renamed fields.
 
-**The roster still lives in two places.** Staff names exist in both the form's checkbox list and the Config tab, and must be spelled identically in both — and match payroll. The system flags a mismatch rather than guessing, but cannot prevent one. This is the most likely thing to break after handoff. A single source of truth, with the form options generated from Config, would fix it properly.
-
+**The roster still lives in two places.** Staff names exist in both the form's checkbox list and the Config tab, and they have to be spelled identically in both — and match payroll. The system flags a mismatch rather than guessing, but it can't prevent one. This is the most likely thing to break after handoff. A single source of truth, with the form options generated from Config, would fix it properly.
 ---
 
 ## Note on data

@@ -31,6 +31,13 @@ var SETTINGS = {
   // 0 = Sunday. Days the shop is closed, so the nightly check stays quiet.
   CLOSED_DAYS: [],
 
+  // Sanity bounds for a shift. Set these to the shop's real hours with about
+  // an hour of slack either side — the tighter they are, the more AM/PM slips
+  // get caught. Any flip within these hours still surfaces as unassigned tips.
+  EARLIEST_START: 10 * 60,   // 10:00 AM — set to opening time minus ~1hr
+  LATEST_END: 22 * 60,       // 10:00 PM — set to closing time plus ~1hr
+  MAX_SHIFT_MINUTES: 12 * 60,
+
   TZ: 'America/Los_Angeles'
 };
 
@@ -55,18 +62,30 @@ function toCents(value) {
 
 function toDollars(cents) { return cents / 100; }
 
-/** Minutes past midnight. Google returns Dates sometimes and strings others. */
+/**
+ * Minutes past midnight. Google returns Dates sometimes and strings others,
+ * and the strings arrive as '5:30:00 PM' — with seconds between the time and
+ * the AM/PM. Look for the suffix anywhere in the string, not just adjacent.
+ */
 function parseMinutes(value) {
   if (value === '' || value === null || value === undefined) return null;
   if (value instanceof Date) return value.getHours() * 60 + value.getMinutes();
 
-  var m = String(value).match(/(\d{1,2}):(\d{2})\s*([apAP])?/);
-  if (!m) return null;
-  var h = parseInt(m[1], 10);
-  var suffix = m[3] ? m[3].toLowerCase() : '';
-  if (suffix === 'p' && h < 12) h += 12;
-  if (suffix === 'a' && h === 12) h = 0;
-  return h * 60 + parseInt(m[2], 10);
+  var s = String(value);
+  var t = s.match(/(\d{1,2}):(\d{2})(?::\d{2})?/);
+  if (!t) return null;
+
+  var h = parseInt(t[1], 10);
+  var min = parseInt(t[2], 10);
+
+  var suffix = s.match(/([ap])\.?\s*m/i);
+  if (suffix) {
+    var isPm = suffix[1].toLowerCase() === 'p';
+    if (isPm && h < 12) h += 12;
+    if (!isPm && h === 12) h = 0;
+  }
+
+  return h * 60 + min;
 }
 
 function dayKey(date) {
@@ -158,18 +177,54 @@ function assignTips(stretches, tips) {
   return { pools: pools, unassigned: unassigned };
 }
 
-function findOverlaps(stretches) {
-  var sorted = stretches.slice().sort(function (a, b) { return a.startMinutes - b.startMinutes; });
-  var problems = [];
-  for (var i = 1; i < sorted.length; i++) {
-    if (sorted[i].startMinutes < sorted[i - 1].endMinutes) {
-      problems.push({ first: sorted[i - 1], second: sorted[i] });
-    }
+/**
+ * Turn individually logged shifts into the stretches tips get split across.
+ *
+ * Each person reports only their own in/out. All boundaries are pooled and
+ * sorted, and the day is cut at every one. Between two adjacent boundaries
+ * the crew is constant, so that window is a stretch.
+ *
+ * This is why nobody needs to know anyone else's hours — a five-minute
+ * overlap falls out of the arithmetic instead of needing to be noticed.
+ */
+function buildStretches(shifts) {
+  if (!shifts || !shifts.length) return [];
+
+  var points = [];
+  shifts.forEach(function (s) {
+    if (points.indexOf(s.startMinutes) === -1) points.push(s.startMinutes);
+    if (points.indexOf(s.endMinutes) === -1) points.push(s.endMinutes);
+  });
+  points.sort(function (a, b) { return a - b; });
+
+  var stretches = [];
+  for (var i = 0; i < points.length - 1; i++) {
+    var from = points[i], to = points[i + 1];
+    var people = [];
+    shifts.forEach(function (s) {
+      if (s.startMinutes <= from && s.endMinutes >= to && people.indexOf(s.person) === -1) {
+        people.push(s.person);
+      }
+    });
+    // A window nobody covered is a real gap. Dropping it means tips inside
+    // come back unassigned and get flagged, not handed to whoever was nearby.
+    if (people.length) stretches.push({ startMinutes: from, endMinutes: to, people: people });
   }
-  return problems;
+  return stretches;
 }
 
-function computeDay(stretches, tips, rotation) {
+/** Someone logging twice in a day would count double in every window. */
+function findDuplicatePeople(shifts) {
+  var seen = {}, dupes = [];
+  shifts.forEach(function (s) {
+    if (seen[s.person] && dupes.indexOf(s.person) === -1) dupes.push(s.person);
+    seen[s.person] = true;
+  });
+  return dupes;
+}
+
+function computeDay(shifts, tips, rotation) {
+  var stretches = buildStretches(shifts);
   var assigned = assignTips(stretches, tips);
   var totals = {};
   assigned.pools.forEach(function (pool) {
@@ -231,7 +286,10 @@ function mapColumns(headerRow) {
     date:  find(function (h) { return h.indexOf('business') !== -1 || h.indexOf('date') !== -1; }),
     start: find(function (h) { return h.indexOf('start') !== -1; }),
     end:   find(function (h) { return h.indexOf('end') !== -1; }),
-    who:   find(function (h) { return h.indexOf('who') !== -1 || h.indexOf('worked') !== -1; }),
+    who:   find(function (h) {
+             return h.indexOf('your name') !== -1 || h.indexOf('name') !== -1 ||
+                    h.indexOf('who') !== -1 || h.indexOf('worked') !== -1;
+           }),
     notes: find(function (h) { return h.indexOf('note') !== -1; })
   };
 
@@ -273,16 +331,14 @@ function readShiftLog() {
     // the window still contains late tips rather than silently matching none.
     if (end <= start) end += 24 * 60;
 
-    var people = String(r[cols.who] || '').split(',')
-      .map(function (s) { return s.trim(); })
-      .filter(function (s) { return s.length > 0; });
+    var person = String(r[cols.who] || '').trim();
 
     var day = normalizeDate(r[cols.date]);
     if (!byDay[day]) byDay[day] = [];
     byDay[day].push({
+      person: person,
       startMinutes: start,
       endMinutes: end,
-      people: people,
       notes: cols.notes === -1 ? '' : (r[cols.notes] || ''),
       row: i + 1
     });
@@ -357,13 +413,13 @@ function recalculate() {
   Object.keys(tipsByDay).forEach(function (d) { allDays[d] = true; });
 
   Object.keys(allDays).sort().forEach(function (day) {
-    var stretches = shiftsByDay[day] || [];
+    var shifts = shiftsByDay[day] || [];
     var tips = tipsByDay[day] || [];
     var rotation = SETTINGS.ROTATE_PENNIES ? dayOfYear(day) : 0;
 
     if (tips.length === 0) return; // no online tips that day, nothing to split
 
-    if (stretches.length === 0) {
+    if (shifts.length === 0) {
       var total = tips.reduce(function (s, t) { return s + t.cents; }, 0);
       flags.push([day, 'No shift logged',
         'Square shows $' + toDollars(total).toFixed(2) + ' in tips but nobody logged a shift. ' +
@@ -371,23 +427,25 @@ function recalculate() {
       return;
     }
 
-    var empty = stretches.filter(function (s) { return s.people.length === 0; });
+    var empty = shifts.filter(function (s) { return !s.person; });
     if (empty.length) {
-      flags.push([day, 'Nobody listed',
-        'The stretch on row ' + empty[0].row + ' has no names checked. It cannot be split.']);
+      flags.push([day, 'No name on the entry',
+        'Row ' + empty[0].row + ' has no name. That shift cannot be counted.']);
       return;
     }
 
-    findOverlaps(stretches).forEach(function (o) {
-      flags.push([day, 'Stretches overlap',
-        minutesToClock(o.first.startMinutes) + '-' + minutesToClock(o.first.endMinutes) +
-        ' overlaps ' + minutesToClock(o.second.startMinutes) + '-' +
-        minutesToClock(o.second.endMinutes) + '. Two crews cannot both own the same tips.']);
+    checkPlausibility(day, shifts).forEach(function (f) { flags.push(f); });
+
+    findDuplicatePeople(shifts).forEach(function (name) {
+      flags.push([day, 'Logged twice',
+        name + ' submitted more than one entry for this day. If they worked two ' +
+        'separate periods that is fine — otherwise delete the extra row, or they ' +
+        'will be counted twice.']);
     });
 
     var result;
     try {
-      result = computeDay(stretches, tips, rotation);
+      result = computeDay(shifts, tips, rotation);
     } catch (err) {
       flags.push([day, 'Allocation refused to run', err.message]);
       return;
@@ -423,6 +481,44 @@ function recalculate() {
   buildPayrollSummary(dailyRows, roster);
 
   return { days: Object.keys(allDays).length, flags: flags.length };
+}
+
+/**
+ * Catch shift times nobody actually worked.
+ *
+ * The dropdown on the form makes AM/PM mistakes nearly impossible, but this
+ * is the backstop for anything that slips through — a 5:30 AM start, or a
+ * shift that runs fifteen hours because someone picked AM for the end time.
+ *
+ * These do not stop the calculation. They ask a human to look.
+ */
+function checkPlausibility(day, shifts) {
+  var out = [];
+
+  shifts.forEach(function (s) {
+    var duration = s.endMinutes - s.startMinutes;
+
+    if (duration > SETTINGS.MAX_SHIFT_MINUTES) {
+      out.push([day, 'Shift looks too long',
+        'Row ' + s.row + ': ' + minutesToClock(s.startMinutes) + ' to ' +
+        minutesToClock(s.endMinutes % (24 * 60)) + ' is ' +
+        (duration / 60).toFixed(1) + ' hours. Check the AM/PM on the end time.']);
+    }
+
+    if (s.startMinutes < SETTINGS.EARLIEST_START) {
+      out.push([day, 'Start time looks wrong',
+        'Row ' + s.row + ' starts at ' + minutesToClock(s.startMinutes) +
+        ', before the shop opens. Check the AM/PM.']);
+    }
+
+    if (s.endMinutes > SETTINGS.LATEST_END && duration <= SETTINGS.MAX_SHIFT_MINUTES) {
+      out.push([day, 'End time looks wrong',
+        'Row ' + s.row + ' ends at ' + minutesToClock(s.endMinutes % (24 * 60)) +
+        ', after the shop closes. Check the AM/PM.']);
+    }
+  });
+
+  return out;
 }
 
 function writeTab(name, headers, rows) {

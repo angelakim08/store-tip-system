@@ -26,7 +26,9 @@ It only shows numbers on a screen. **You** decide what to do with them.
 
 **You do nothing.**
 
-Staff fill in a short form when their shift ends. The computer divides the tips by itself, right away.
+Each person fills in a short form when their own shift ends — their name, and the times they started and finished. Nothing else.
+
+The computer works out who was working together at each moment and divides the tips by itself, right away.
 
 Nobody needs to click anything.
 
@@ -86,7 +88,9 @@ Nothing breaks. Nothing is lost. You can stop using this at any time.
 | **No shift logged** | Nobody filled the form that day | Add it now, or do that day on paper |
 | **Stretches overlap** | Two people wrote the same hours | Fix one entry's times. Recalculate |
 | **Name not on the roster** | New person, or spelled differently | Add them to **Config**. Recalculate |
-| **Nobody listed** | Somebody forgot to tick names | Ask who worked. Fix it. Recalculate |
+| **No name on the entry** | The name was left blank | Ask whose shift it was. Fix it. Recalculate |
+| **Logged twice** | One person submitted twice that day | Fine if they worked two separate periods. Otherwise delete the extra row |
+| **Shift looks too long** | Probably an AM/PM mistake | Check the end time. Fix it. Recalculate |
 
 **Still wrong?** Do that day on paper, then contact the administrator.
 **Everything wrong?** Do all two weeks on paper. Nothing is lost.
