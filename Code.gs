@@ -73,9 +73,36 @@ function dayKey(date) {
   return Utilities.formatDate(date, SETTINGS.TZ, 'yyyy-MM-dd');
 }
 
+/**
+ * Turn whatever the sheet gives us into 'yyyy-MM-dd'.
+ *
+ * Accepts a real Date, '1/1/2020', '01/01/2020', or '2020-01-01' so the form
+ * and the pasted export can disagree about format without breaking the match.
+ *
+ * Deliberately does NOT convert through a timezone. A Date from a sheet is
+ * already midnight in the sheet's own timezone; running it through
+ * Utilities.formatDate with a different zone rolls it back a day, which turns
+ * every date silently into the one before it.
+ */
 function normalizeDate(value) {
-  if (value instanceof Date) return dayKey(value);
-  return String(value).trim();
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+
+  if (value instanceof Date) {
+    return value.getFullYear() + '-' + pad(value.getMonth() + 1) + '-' + pad(value.getDate());
+  }
+
+  var s = String(value).trim();
+  if (!s) return '';
+
+  // Already yyyy-mm-dd (possibly with a time appended)
+  var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return iso[1] + '-' + pad(parseInt(iso[2], 10)) + '-' + pad(parseInt(iso[3], 10));
+
+  // m/d/yyyy or mm/dd/yyyy
+  var us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (us) return us[3] + '-' + pad(parseInt(us[1], 10)) + '-' + pad(parseInt(us[2], 10));
+
+  return s;
 }
 
 function dayOfYear(dateStr) {
@@ -409,23 +436,37 @@ function writeTab(name, headers, rows) {
 }
 
 /**
- * Roll daily splits into 14-day pay periods anchored on Config!B2.
+ * Which semi-monthly pay period a date falls in.
+ *
+ * The shop pays on the 15th and the last day of the month, so periods are
+ * the 1st-15th and the 16th-end of month. This is NOT the same as biweekly:
+ * semi-monthly is 24 periods a year on fixed dates, biweekly is 26 on a
+ * rolling 14-day cycle. They drift apart within weeks.
+ */
+function payPeriodLabel(dateStr) {
+  var d = new Date(dateStr + 'T12:00:00');
+  var year = d.getFullYear();
+  var month = d.getMonth();
+  var day = d.getDate();
+
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  var ym = year + '-' + pad(month + 1);
+
+  if (day <= 15) return ym + '-01 to ' + ym + '-15';
+
+  var lastDay = new Date(year, month + 1, 0).getDate();
+  return ym + '-16 to ' + ym + '-' + pad(lastDay);
+}
+
+/**
+ * Roll daily splits into semi-monthly pay periods.
  * Grouped by payout channel: ADP rows are what the owner keys into payroll,
- * Cash rows are what he hands over in person.
+ * Cash rows are what was already handed over in person.
  */
 function buildPayrollSummary(dailyRows, roster) {
-  var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
-  var anchor = config ? config.getRange('B2').getValue() : null;
-  if (!(anchor instanceof Date)) anchor = new Date('2026-01-01T12:00:00');
-
   var buckets = {};
   dailyRows.forEach(function (row) {
-    var d = new Date(row[0] + 'T12:00:00');
-    var periods = Math.floor((d - anchor) / (14 * 86400000));
-    var start = new Date(anchor.getTime() + periods * 14 * 86400000);
-    var end = new Date(start.getTime() + 13 * 86400000);
-    var label = dayKey(start) + ' to ' + dayKey(end);
-
+    var label = payPeriodLabel(row[0]);
     if (!buckets[label]) buckets[label] = {};
     buckets[label][row[1]] = (buckets[label][row[1]] || 0) + Math.round(row[2] * 100);
   });
@@ -462,6 +503,55 @@ function buildPayrollSummary(dailyRows, roster) {
 // ---------------------------------------------------------------------------
 // Triggers
 // ---------------------------------------------------------------------------
+/**
+ * Show what the script is actually reading from both tabs, and where they
+ * fail to line up. Run this first whenever a day produces no split.
+ */
+function diagnose() {
+  var out = [];
+
+  try {
+    var sheet = findResponseSheet();
+    out.push('Response tab: "' + sheet.getName() + '"');
+    var headers = sheet.getDataRange().getValues()[0];
+    var cols = mapColumns(headers);
+    out.push('Columns found: date=' + cols.date + ' start=' + cols.start +
+             ' end=' + cols.end + ' who=' + cols.who);
+  } catch (err) {
+    out.push('PROBLEM reading the form tab: ' + err.message);
+  }
+
+  var shiftDays, tipDays;
+  try { shiftDays = Object.keys(readShiftLog()).sort(); }
+  catch (err) { shiftDays = []; out.push('PROBLEM: ' + err.message); }
+
+  try { tipDays = Object.keys(readSquareTips()).sort(); }
+  catch (err) { tipDays = []; out.push('PROBLEM: ' + err.message); }
+
+  out.push('');
+  out.push('Dates in the shift log (' + shiftDays.length + '):');
+  out.push(shiftDays.length ? shiftDays.join(', ') : '  none');
+  out.push('');
+  out.push('Dates in Square Tips (' + tipDays.length + '):');
+  out.push(tipDays.length ? tipDays.join(', ') : '  none');
+
+  var tipsOnly = tipDays.filter(function (d) { return shiftDays.indexOf(d) === -1; });
+  var shiftsOnly = shiftDays.filter(function (d) { return tipDays.indexOf(d) === -1; });
+
+  out.push('');
+  if (!tipsOnly.length && !shiftsOnly.length && shiftDays.length) {
+    out.push('Every date matches on both sides.');
+  } else {
+    if (tipsOnly.length) out.push('Tips with no matching shift: ' + tipsOnly.join(', '));
+    if (shiftsOnly.length) out.push('Shifts with no matching tips: ' + shiftsOnly.join(', '));
+    out.push('');
+    out.push('If a date appears on both lists in different forms, the two tabs ' +
+             'are storing dates differently.');
+  }
+
+  SpreadsheetApp.getUi().alert('Diagnostics', out.join('\n'), SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
 function onFormSubmit() {
   try { recalculate(); }
   catch (err) { notify('Tip sheet hit an error', String(err)); }
@@ -471,7 +561,7 @@ function onFormSubmit() {
 function nightlyCheck() {
   if (SETTINGS.CLOSED_DAYS.indexOf(new Date().getDay()) !== -1) return;
 
-  var today = dayKey(new Date());
+  var today = normalizeDate(new Date());
   var log = readShiftLog();
 
   if (!log[today] || !log[today].length) {
@@ -508,7 +598,8 @@ function setupSheet() {
     config.getRange('A1').setValue('Setting').setFontWeight('bold');
     config.getRange('B1').setValue('Value').setFontWeight('bold');
 
-    config.getRange('A2').setValue('Pay period start (any known one)');
+    config.getRange('A2').setValue('Pay periods (fixed: 1st-15th, 16th-EOM)');
+    config.getRange('B2').setValue('semi-monthly');
     config.getRange('A3').setValue('Alert email');
 
     config.getRange('A5').setValue('Name (spelled exactly as in ADP)').setFontWeight('bold');
@@ -566,5 +657,7 @@ function onOpen() {
     .addItem('2. Install triggers', 'setupTriggers')
     .addSeparator()
     .addItem('Recalculate now', 'recalculate')
+    .addSeparator()
+    .addItem('Diagnose (why is a day not splitting?)', 'diagnose')
     .addToUi();
 }
