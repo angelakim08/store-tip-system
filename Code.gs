@@ -573,13 +573,16 @@ function buildPayrollSummary(dailyRows, roster) {
   Object.keys(buckets).sort().reverse().forEach(function (label) {
     var names = Object.keys(buckets[label]);
 
-    // Cash people are trainees, paid their tips in person at the end of each
-    // shift. Their row is a RECORD of money already handed over, not an
-    // instruction to pay — the label says so explicitly so nobody double-pays.
+    // Non-payroll people are settled by the owner directly and never keyed
+    // into ADP. The label deliberately does not say when or how they were
+    // paid — that is the owner's arrangement, not something this sheet
+    // tracks. It only has to stop them being entered into payroll twice.
     // '?' when someone is missing from Config — visible, never guessed as ADP.
     var channelOf = function (n) {
       if (!roster || !roster.hasOwnProperty(n)) return '? — not in Config';
-      return roster[n] === 'Cash' ? 'Cash — already paid nightly' : 'ADP — enter in payroll';
+      return roster[n] === 'Cash'
+        ? 'Not in payroll — owner settles directly'
+        : 'ADP — enter in payroll';
     };
 
     names.sort(function (a, b) {
