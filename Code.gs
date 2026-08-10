@@ -129,6 +129,23 @@ function dayOfYear(dateStr) {
   return Math.floor((d - new Date(d.getFullYear(), 0, 0)) / 86400000);
 }
 
+var MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+/** '2026-08-04' -> 'Aug 4, 2026'. Nobody reads ISO dates at 11pm. */
+function friendlyDate(iso) {
+  var m = String(iso).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return iso;
+  return MONTHS[parseInt(m[2], 10) - 1] + ' ' + parseInt(m[3], 10) + ', ' + m[1];
+}
+
+/** '2026-08-01 to 2026-08-15' -> 'Aug 1 - 15, 2026'. */
+function friendlyPeriod(label) {
+  var m = String(label).match(/^(\d{4})-(\d{2})-(\d{2}) to (\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return label;
+  return MONTHS[parseInt(m[2], 10) - 1] + ' ' + parseInt(m[3], 10) +
+         ' - ' + parseInt(m[6], 10) + ', ' + m[1];
+}
+
 function minutesToClock(m) {
   var h = Math.floor(m / 60), mm = m % 60;
   return (h % 12 === 0 ? 12 : h % 12) + ':' + (mm < 10 ? '0' : '') + mm + (h < 12 ? 'am' : 'pm');
@@ -421,42 +438,43 @@ function recalculate() {
 
     if (shifts.length === 0) {
       var total = tips.reduce(function (s, t) { return s + t.cents; }, 0);
-      flags.push([day, 'No shift logged',
-        'Square shows $' + toDollars(total).toFixed(2) + ' in tips but nobody logged a shift. ' +
-        'These tips cannot be paid out until someone fills in the form for this day.']);
+      flags.push([friendlyDate(day), 'Nobody filled in the form for this day',
+        'Square shows $' + toDollars(total).toFixed(2) + ' in tips. Ask who worked, ' +
+        'have them fill in the form, and these tips will be shared out.']);
       return;
     }
 
     var empty = shifts.filter(function (s) { return !s.person; });
     if (empty.length) {
-      flags.push([day, 'No name on the entry',
-        'Row ' + empty[0].row + ' has no name. That shift cannot be counted.']);
+      flags.push([friendlyDate(day), 'Someone left their name blank',
+        'Row ' + empty[0].row + ' of the form responses has no name. Ask whose shift ' +
+        'it was and type it in, spelled the same as in Config.']);
       return;
     }
 
     checkPlausibility(day, shifts).forEach(function (f) { flags.push(f); });
 
     findDuplicatePeople(shifts).forEach(function (name) {
-      flags.push([day, 'Logged twice',
-        name + ' submitted more than one entry for this day. If they worked two ' +
-        'separate periods that is fine — otherwise delete the extra row, or they ' +
-        'will be counted twice.']);
+      flags.push([friendlyDate(day), name + ' filled in the form twice',
+        'This is fine if they really worked two separate times that day. ' +
+        'If not, delete the extra row or they will be paid twice.']);
     });
 
     var result;
     try {
       result = computeDay(shifts, tips, rotation);
     } catch (err) {
-      flags.push([day, 'Allocation refused to run', err.message]);
+      flags.push([friendlyDate(day), 'Something is wrong with this day', err.message]);
       return;
     }
 
     if (result.unassigned.length) {
       var stray = result.unassigned.reduce(function (s, t) { return s + t.cents; }, 0);
-      flags.push([day, 'Tips outside every shift',
-        '$' + toDollars(stray).toFixed(2) + ' came in when nobody was logged as working ' +
-        '(first one at ' + minutesToClock(result.unassigned[0].minutes) + '). ' +
-        'Either a stretch was not logged, or the logged times are wrong.']);
+      flags.push([friendlyDate(day),
+        'Tips came in when nobody was logged as working',
+        '$' + toDollars(stray).toFixed(2) + ' of tips, starting at ' +
+        minutesToClock(result.unassigned[0].minutes) + '. Someone probably forgot to ' +
+        'fill in the form, or typed the wrong times. Fix it and this will go away.']);
     }
 
     Object.keys(result.totals).sort().forEach(function (name) {
@@ -468,15 +486,18 @@ function recalculate() {
   // A name in the shift log that is not on the roster means either a new hire
   // nobody added, or a spelling that will not match ADP. Both pay someone wrong.
   Object.keys(unknownNames).sort().forEach(function (name) {
-    flags.push(['—', 'Name not on the roster',
-      '"' + name + '" appears in the shift log but is not listed in Config. ' +
-      'Add them to Config with ADP or Cash, spelled exactly as in ADP.']);
+    flags.push(['—', '"' + name + '" is not in the Config list',
+      'They filled in the form but are not on the roster, so the sheet does not know ' +
+      'whether they go into payroll. Add them to the Config tab, spelled exactly the ' +
+      'same way, and choose ADP or Cash.']);
   });
 
   // slice() first — reverse() mutates, and dailyRows is passed on below.
-  writeTab(TAB.DAILY, ['Business Date', 'Employee', 'Online Tips'],
-    dailyRows.slice().reverse());
-  writeTab(TAB.FLAGS, ['Business Date', 'Problem', 'What to do'],
+  writeTab(TAB.DAILY, ['Date', 'Employee', 'Online Tips'],
+    dailyRows.slice().reverse().map(function (r) {
+      return [friendlyDate(r[0]), r[1], r[2]];
+    }), 3);
+  writeTab(TAB.FLAGS, ['Date', 'What happened', 'What to do'],
     flags.slice().reverse());
   buildPayrollSummary(dailyRows, roster);
 
@@ -499,34 +520,38 @@ function checkPlausibility(day, shifts) {
     var duration = s.endMinutes - s.startMinutes;
 
     if (duration > SETTINGS.MAX_SHIFT_MINUTES) {
-      out.push([day, 'Shift looks too long',
-        'Row ' + s.row + ': ' + minutesToClock(s.startMinutes) + ' to ' +
-        minutesToClock(s.endMinutes % (24 * 60)) + ' is ' +
-        (duration / 60).toFixed(1) + ' hours. Check the AM/PM on the end time.']);
+      out.push([friendlyDate(day), (s.person || 'Someone') + ' has a very long shift',
+        minutesToClock(s.startMinutes) + ' to ' + minutesToClock(s.endMinutes % (24 * 60)) +
+        ' is ' + (duration / 60).toFixed(1) + ' hours. This is almost always an AM/PM ' +
+        'mix-up on the end time. Row ' + s.row + ' of the form responses.']);
     }
 
     if (s.startMinutes < SETTINGS.EARLIEST_START) {
-      out.push([day, 'Start time looks wrong',
-        'Row ' + s.row + ' starts at ' + minutesToClock(s.startMinutes) +
-        ', before the shop opens. Check the AM/PM.']);
+      out.push([friendlyDate(day), (s.person || 'Someone') + ' started before the shop opens',
+        'The form says ' + minutesToClock(s.startMinutes) + '. Check the AM/PM on the ' +
+        'start time. Row ' + s.row + ' of the form responses.']);
     }
 
     if (s.endMinutes > SETTINGS.LATEST_END && duration <= SETTINGS.MAX_SHIFT_MINUTES) {
-      out.push([day, 'End time looks wrong',
-        'Row ' + s.row + ' ends at ' + minutesToClock(s.endMinutes % (24 * 60)) +
-        ', after the shop closes. Check the AM/PM.']);
+      out.push([friendlyDate(day), (s.person || 'Someone') + ' finished after the shop closes',
+        'The form says ' + minutesToClock(s.endMinutes % (24 * 60)) + '. Check the AM/PM ' +
+        'on the end time. Row ' + s.row + ' of the form responses.']);
     }
   });
 
   return out;
 }
 
-function writeTab(name, headers, rows) {
+function writeTab(name, headers, rows, moneyCol) {
   var ss = SpreadsheetApp.getActive();
   var sheet = ss.getSheetByName(name) || ss.insertSheet(name);
   sheet.clear();
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
-  if (rows.length) sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+  if (rows.length) {
+    sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
+    // Dollars, so '35' reads as '$35.00' rather than looking like a count.
+    if (moneyCol) sheet.getRange(2, moneyCol, rows.length, 1).setNumberFormat('$#,##0.00');
+  }
   sheet.setFrozenRows(1);
   sheet.autoResizeColumns(1, headers.length);
 }
@@ -573,30 +598,28 @@ function buildPayrollSummary(dailyRows, roster) {
   Object.keys(buckets).sort().reverse().forEach(function (label) {
     var names = Object.keys(buckets[label]);
 
-    // Non-payroll people are settled by the owner directly and never keyed
-    // into ADP. The label deliberately does not say when or how they were
-    // paid — that is the owner's arrangement, not something this sheet
-    // tracks. It only has to stop them being entered into payroll twice.
-    // '?' when someone is missing from Config — visible, never guessed as ADP.
-    var channelOf = function (n) {
-      if (!roster || !roster.hasOwnProperty(n)) return '? — not in Config';
-      return roster[n] === 'Cash'
-        ? 'Not in payroll — owner settles directly'
-        : 'ADP — enter in payroll';
+    // The action column is a short answer to one question: does this go into
+    // payroll? Long explanatory text belongs in the guide, not on the page
+    // someone reads at 11pm while keying numbers.
+    // '?' when someone is missing from Config — visible, never guessed as Yes.
+    var enterInAdp = function (n) {
+      if (!roster || !roster.hasOwnProperty(n)) return '? CHECK CONFIG';
+      return roster[n] === 'Cash' ? 'No — you pay directly' : 'Yes';
     };
 
+    // ADP people first so the rows to key in are contiguous.
     names.sort(function (a, b) {
-      var ca = channelOf(a), cb = channelOf(b);
+      var ca = enterInAdp(a), cb = enterInAdp(b);
       return ca === cb ? (a < b ? -1 : 1) : (ca < cb ? -1 : 1);
     });
 
     names.forEach(function (name) {
-      out.push([label, channelOf(name), name, toDollars(buckets[label][name])]);
+      out.push([friendlyPeriod(label), name, toDollars(buckets[label][name]), enterInAdp(name)]);
     });
   });
 
   writeTab(TAB.PAYROLL,
-    ['Pay Period', 'Paid via', 'Employee', 'Total Online Tips'], out);
+    ['Pay Period', 'Employee', 'Total Online Tips', 'Enter in ADP?'], out, 3);
 }
 
 // ---------------------------------------------------------------------------
@@ -654,6 +677,23 @@ function diagnose() {
 function onFormSubmit() {
   try { recalculate(); }
   catch (err) { notify('Tip sheet hit an error', String(err)); }
+}
+
+/**
+ * Fires when the sheet is edited by hand — which in practice means someone
+ * pasting the export into Square Tips. Without this the owner would have to
+ * remember to press a button, and "remember to press a button" is exactly the
+ * kind of step that gets skipped.
+ *
+ * Guarded to the tips tab so ordinary edits elsewhere don't trigger a rebuild.
+ */
+function onSheetChange(e) {
+  try {
+    var sheet = SpreadsheetApp.getActive().getActiveSheet();
+    if (sheet && sheet.getName() === TAB.TIPS) recalculate();
+  } catch (err) {
+    notify('Tip sheet hit an error', String(err));
+  }
 }
 
 /** Nightly backstop. The end-of-day checklist is the real fix. */
@@ -745,9 +785,12 @@ function setupTriggers() {
   ScriptApp.getProjectTriggers().forEach(function (t) { ScriptApp.deleteTrigger(t); });
   var ss = SpreadsheetApp.getActive();
   ScriptApp.newTrigger('onFormSubmit').forSpreadsheet(ss).onFormSubmit().create();
+  ScriptApp.newTrigger('onSheetChange').forSpreadsheet(ss).onChange().create();
   ScriptApp.newTrigger('nightlyCheck').timeBased()
     .atHour(SETTINGS.NIGHTLY_CHECK_HOUR).everyDays(1).create();
-  SpreadsheetApp.getUi().alert('Triggers installed.');
+  SpreadsheetApp.getUi().alert(
+    'Triggers installed.\n\nTips now recalculate automatically when a form is ' +
+    'submitted and when the Square Tips tab is edited.');
 }
 
 function onOpen() {
