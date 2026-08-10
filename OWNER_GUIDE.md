@@ -9,7 +9,7 @@
 - It looks at the tips already recorded in the payment system.
 - It sees who was working at that time.
 - It divides the tips between them.
-- It adds up the total for each person for two weeks.
+- It adds up the total for each person for the pay period.
 
 ## What the computer CANNOT do
 
@@ -37,7 +37,7 @@ Nobody needs to click anything.
 ## Payday — 5 steps
 
 ### 1. Download the tips
-Open the payment system. Download the transactions for these two weeks.
+Open Square. Download the transactions for this pay period.
 
 ### 2. Put them in the sheet
 Click the tab at the bottom called **Square Tips**.
@@ -60,15 +60,15 @@ At the top, click **Tips**, then **Recalculate now**. Wait 5 seconds.
 
 ### 5. Open the Payroll Summary tab
 
-The newest two weeks are at the **top**.
+The newest period is at the **top**.
 
 | If it says | Do this |
 |---|---|
 | **ADP — enter in payroll** | Put this amount in payroll as tips |
-| **Cash — already paid nightly** | **Nothing.** Already paid. Record only. |
+| **Not in payroll — owner settles directly** | **Nothing.** You handle this person yourself. Record only. |
 | **? — not in Config** | Stop. See Problems below. |
 
-**Never pay a "Cash" line.** That person was already paid at the end of their shift.
+**Never enter a "Not in payroll" line into ADP.** You settle that person directly. The row is only so the amount is written down.
 
 ---
 
@@ -86,14 +86,14 @@ Nothing breaks. Nothing is lost. You can stop using this at any time.
 |---|---|---|
 | **Tips outside every shift** | Someone forgot the form | Ask who worked. Add the missing entry. Recalculate |
 | **No shift logged** | Nobody filled the form that day | Add it now, or do that day on paper |
-| **Stretches overlap** | Two people wrote the same hours | Fix one entry's times. Recalculate |
-| **Name not on the roster** | New person, or spelled differently | Add them to **Config**. Recalculate |
 | **No name on the entry** | The name was left blank | Ask whose shift it was. Fix it. Recalculate |
 | **Logged twice** | One person submitted twice that day | Fine if they worked two separate periods. Otherwise delete the extra row |
 | **Shift looks too long** | Probably an AM/PM mistake | Check the end time. Fix it. Recalculate |
+| **Start time looks wrong** | Probably an AM/PM mistake | Check the start time. Fix it. Recalculate |
+| **Name not on the roster** | New person, or spelled differently | Add them to **Config**. Recalculate |
 
 **Still wrong?** Do that day on paper, then contact the administrator.
-**Everything wrong?** Do all two weeks on paper. Nothing is lost.
+**Everything wrong?** Do the whole pay period on paper. Nothing is lost.
 
 ---
 
@@ -101,16 +101,20 @@ Nothing breaks. Nothing is lost. You can stop using this at any time.
 
 Two places. Spelled **exactly the same** in both, and the same as payroll.
 
-1. **The form** — find "Who worked this shift?" and add their name.
-2. **The Config tab** — name in column A, then in column B choose:
-   - **ADP** — normal employee, paid through payroll
-   - **Cash** — trainee, handed their tips at the end of the shift
+**1. The form** — find "Your name" and add them to the list.
 
-## When a trainee becomes an employee
+**2. The Config tab** — name in column A, then in column B choose:
+
+- **ADP** — goes into payroll like everyone else
+- **Cash** — not on payroll; you pay this person yourself
+
+The question column B is really asking is: *does this person go into ADP?*
+
+## When someone starts going through payroll
 
 In **Config**, change **Cash** to **ADP**.
 
-Do this on the **first day of a new two weeks**, not in the middle.
+Do this on the **first day of a new pay period**, not in the middle.
 
 ## When someone leaves
 
@@ -121,7 +125,7 @@ Remove their name from the **form**.
 
 ## Things to know
 
-- Nothing is ever deleted. Old weeks stay in the sheet.
+- Nothing is ever deleted. Old pay periods stay in the sheet.
 - Made a mistake? Fix it and click **Recalculate now**. Everything corrects itself.
 - One bad day does not affect any other day.
 - The system emails a reminder if nobody fills the form by 10pm.
