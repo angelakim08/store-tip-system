@@ -364,26 +364,60 @@ function readShiftLog() {
 }
 
 /**
- * Square tips. Paste the export into the `Square Tips` tab.
- * Columns: Date | Time | Tip amount   (header row expected)
- * Rows with a zero or blank tip are ignored, which is most of them.
+ * Locate the Date, Time and Tip columns in whatever was pasted.
+ *
+ * Square's raw transactions export is ~20 columns wide. Rather than asking
+ * the owner to delete columns before pasting — the step most likely to go
+ * wrong on payday — we find the three we need by header name and ignore the
+ * rest. Falls back to A/B/C if there is no recognisable header row, which is
+ * what a hand-typed test sheet looks like.
+ */
+function mapTipColumns(headerRow) {
+  var find = function (test) {
+    for (var i = 0; i < headerRow.length; i++) {
+      if (test(String(headerRow[i]).trim().toLowerCase())) return i;
+    }
+    return -1;
+  };
+
+  var cols = {
+    date: find(function (h) { return h === 'date'; }),
+    time: find(function (h) { return h === 'time'; }),
+    // 'tip' exactly — never 'tips', 'tip percentage', or a column that merely
+    // contains the word, or we would silently total the wrong money.
+    tip:  find(function (h) { return h === 'tip'; })
+  };
+
+  if (cols.date === -1 || cols.time === -1 || cols.tip === -1) {
+    return { date: 0, time: 1, tip: 2, guessed: true };
+  }
+  return cols;
+}
+
+/**
+ * Square tips. Paste the whole export into the `Square Tips` tab — extra
+ * columns are fine and ignored. Rows with a zero or blank tip are skipped,
+ * which is most of them.
  */
 function readSquareTips() {
   var sheet = SpreadsheetApp.getActive().getSheetByName(TAB.TIPS);
   if (!sheet) return {};
 
   var rows = sheet.getDataRange().getValues();
+  if (rows.length < 2) return {};
+
+  var cols = mapTipColumns(rows[0]);
   var byDay = {};
 
   for (var i = 1; i < rows.length; i++) {
     var r = rows[i];
-    if (!r[0]) continue;
+    if (!r[cols.date]) continue;
 
-    var minutes = parseMinutes(r[1]);
-    var cents = toCents(r[2]);
+    var minutes = parseMinutes(r[cols.time]);
+    var cents = toCents(r[cols.tip]);
     if (minutes === null || cents === null || cents === 0) continue;
 
-    var day = normalizeDate(r[0]);
+    var day = normalizeDate(r[cols.date]);
     if (!byDay[day]) byDay[day] = [];
     byDay[day].push({ minutes: minutes, cents: cents, row: i + 1 });
   }
@@ -650,6 +684,19 @@ function diagnose() {
   try { tipDays = Object.keys(readSquareTips()).sort(); }
   catch (err) { tipDays = []; out.push('PROBLEM: ' + err.message); }
 
+  try {
+    var tipSheet = SpreadsheetApp.getActive().getSheetByName(TAB.TIPS);
+    if (tipSheet) {
+      var tipHeaders = tipSheet.getDataRange().getValues()[0] || [];
+      var tc = mapTipColumns(tipHeaders);
+      out.push(tc.guessed
+        ? 'Square Tips: no Date/Time/Tip headers found — assuming columns A, B, C.'
+        : 'Square Tips: Date=col ' + tc.date + ', Time=col ' + tc.time + ', Tip=col ' + tc.tip);
+    }
+  } catch (err) {
+    out.push('PROBLEM reading Square Tips: ' + err.message);
+  }
+
   out.push('');
   out.push('Dates in the shift log (' + shiftDays.length + '):');
   out.push(shiftDays.length ? shiftDays.join(', ') : '  none');
@@ -764,8 +811,9 @@ function setupSheet() {
     tips.getRange('A1:C1').setValues([['Date', 'Time', 'Tip']]).setFontWeight('bold');
     tips.setFrozenRows(1);
     tips.getRange('E1').setValue(
-      'Paste the Square export here. Date in A, time in B, tip amount in C. ' +
-      'Rows with no tip are ignored. Extra columns to the right are fine.');
+      'Paste the whole Square transactions export here, including its header row. ' +
+      'Extra columns are fine — the sheet finds Date, Time and Tip by name. ' +
+      'Rows with no tip are ignored.');
     tips.setColumnWidth(1, 110);
     tips.setColumnWidth(2, 110);
     created.push(TAB.TIPS);
