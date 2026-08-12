@@ -468,7 +468,25 @@ function recalculate() {
     var tips = tipsByDay[day] || [];
     var rotation = SETTINGS.ROTATE_PENNIES ? dayOfYear(day) : 0;
 
-    if (tips.length === 0) return; // no online tips that day, nothing to split
+    // Check the shift entries themselves before deciding whether there is
+    // anything to split. A bad time typed today should surface today, not sit
+    // invisible until the export is pasted at payroll.
+    checkPlausibility(day, shifts).forEach(function (f) { flags.push(f); });
+
+    findDuplicatePeople(shifts).forEach(function (name) {
+      flags.push([friendlyDate(day), name + ' filled in the form twice',
+        'This is fine if they really worked two separate times that day. ' +
+        'If not, delete the extra row or they will be paid twice.']);
+    });
+
+    var noName = shifts.filter(function (s) { return !s.person; });
+    if (noName.length) {
+      flags.push([friendlyDate(day), 'Someone left their name blank',
+        'Row ' + noName[0].row + ' of the form responses has no name. Ask whose shift ' +
+        'it was and type it in, spelled the same as in Config.']);
+    }
+
+    if (tips.length === 0) return; // no online tips yet, nothing to split
 
     if (shifts.length === 0) {
       var total = tips.reduce(function (s, t) { return s + t.cents; }, 0);
@@ -478,21 +496,8 @@ function recalculate() {
       return;
     }
 
-    var empty = shifts.filter(function (s) { return !s.person; });
-    if (empty.length) {
-      flags.push([friendlyDate(day), 'Someone left their name blank',
-        'Row ' + empty[0].row + ' of the form responses has no name. Ask whose shift ' +
-        'it was and type it in, spelled the same as in Config.']);
-      return;
-    }
-
-    checkPlausibility(day, shifts).forEach(function (f) { flags.push(f); });
-
-    findDuplicatePeople(shifts).forEach(function (name) {
-      flags.push([friendlyDate(day), name + ' filled in the form twice',
-        'This is fine if they really worked two separate times that day. ' +
-        'If not, delete the extra row or they will be paid twice.']);
-    });
+    // A nameless entry cannot be split, so stop here for this day.
+    if (shifts.some(function (s) { return !s.person; })) return;
 
     var result;
     try {
