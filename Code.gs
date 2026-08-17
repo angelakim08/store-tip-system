@@ -555,18 +555,24 @@ function recalculate() {
   var flags = [];
 
   var configSheetForCheck = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
-  if (configSheetForCheck && findOwnerTableStart(configSheetForCheck) === null) {
-    // Doesn't block the run — staff shifts are unaffected either way — but
-    // it means the owner's own shift table can't be found, so any entries
-    // in it are silently not being read. Worth surfacing rather than left
-    // as a quiet gap someone only discovers on payday.
-    flags.push(['—', 'Owner\'s shift table not found',
-      'Could not find a row in Config with "Date" in column A and "Started" in ' +
-      'column B. If that header row was moved, renamed, or deleted, ' +
-      '"' + ((configSheetForCheck.getRange('B4').getValue()) || 'the owner') +
-      '"\'s own shifts are not being read. Restore the header row exactly as ' +
-      '"Date | Started | Ended | Keeping" and recalculate.']);
+  var ownerName = 'Ali';
+  if (configSheetForCheck) {
+    var rawOwnerName = String(configSheetForCheck.getRange('B4').getValue() || '').trim();
+    if (rawOwnerName) ownerName = rawOwnerName;
+
+    if (findOwnerTableStart(configSheetForCheck) === null) {
+      // Doesn't block the run — staff shifts are unaffected either way — but
+      // it means the owner's own shift table can't be found, so any entries
+      // in it are silently not being read. Worth surfacing rather than left
+      // as a quiet gap someone only discovers on payday.
+      flags.push(['—', 'Owner\'s shift table not found',
+        'Could not find a row in Config with "Date" in column A and "Started" in ' +
+        'column B. If that header row was moved, renamed, or deleted, ' +
+        '"' + ownerName + '"\'s own shifts are not being read. Restore the header ' +
+        'row exactly as "Date | Started | Ended | Keeping" and recalculate.']);
+    }
   }
+
   Object.keys(ownerShiftsByDay).forEach(function (day) {
     if (!shiftsByDay[day]) shiftsByDay[day] = [];
     shiftsByDay[day] = shiftsByDay[day].concat(ownerShiftsByDay[day]);
@@ -608,10 +614,19 @@ function recalculate() {
     if (tips.length === 0) return; // no online tips yet, nothing to split
 
     if (shifts.length === 0) {
-      var total = tips.reduce(function (s, t) { return s + t.cents; }, 0);
-      flags.push([friendlyDate(day), 'Nobody filled in the form for this day',
-        'Square shows $' + toDollars(total).toFixed(2) + ' in tips. Ask who worked, ' +
-        'have them fill in the form, and these tips will be shared out.']);
+      // Nobody logged anything, but tips came in. Now that Ali often works
+      // solo and never touches the form on a normal day, this is his most
+      // common day — not a mistake. Assume it was him, alone, all day, and
+      // let the totals flow. Flag it as informational so the manager can
+      // scan and correct the rare day this assumption is actually wrong
+      // (e.g. someone else worked and genuinely forgot to log).
+      var assumedTotal = tips.reduce(function (s, t) { return s + t.cents; }, 0);
+
+      dailyRows.push([day, ownerName, toDollars(assumedTotal)]);
+      flags.push([friendlyDate(day), 'Assumed ' + ownerName + ' worked alone',
+        'Nobody logged a shift, but $' + toDollars(assumedTotal).toFixed(2) + ' in tips came in. ' +
+        'This was given entirely to ' + ownerName + ', assuming a normal solo day. If someone ' +
+        'else actually worked and forgot to log it, add their shift and recalculate.']);
       return;
     }
 
@@ -927,17 +942,34 @@ function onSheetChange(e) {
   }
 }
 
-/** Nightly backstop. The end-of-day checklist is the real fix. */
+/**
+ * Previously emailed nightly if nobody had logged a shift that day. Retired:
+ * once Ali began routinely working solo without ever touching the form, an
+ * unlogged day became his NORMAL day rather than a mistake, and the nightly
+ * check has no way to tell the two apart — it runs before tips exist, so it
+ * can't yet know whether the day was really covered. Kept as a callable
+ * function in case it's wanted again later (e.g. paired with a real
+ * schedule feed), but no trigger calls it automatically anymore.
+ *
+ * The actual safety net moved to recalculate(): an unlogged day WITH tips is
+ * now flagged as "Assumed [owner] worked alone" for the manager to review at
+ * payroll, when there is enough information (the tip total) to judge it.
+ */
 function nightlyCheck() {
   if (SETTINGS.CLOSED_DAYS.indexOf(new Date().getDay()) !== -1) return;
 
   var today = normalizeDate(new Date());
   var log = readShiftLog();
+  var ownerLog = readOwnerShifts();
 
-  if (!log[today] || !log[today].length) {
+  var loggedByStaff = log[today] && log[today].length;
+  var loggedByOwner = ownerLog[today] && ownerLog[today].length;
+
+  if (!loggedByStaff && !loggedByOwner) {
     notify('No shift logged today',
-      'Nobody filled in the shift form for ' + today + '. ' +
-      'Online tips for today cannot be allocated until someone does.');
+      'Nobody filled in the shift form for ' + today + ', and nothing is in ' +
+      'the owner\'s own table either. Online tips for today cannot be ' +
+      'allocated until someone logs it.');
   }
 }
 
@@ -1027,8 +1059,9 @@ function setupTriggers() {
   var ss = SpreadsheetApp.getActive();
   ScriptApp.newTrigger('onFormSubmit').forSpreadsheet(ss).onFormSubmit().create();
   ScriptApp.newTrigger('onSheetChange').forSpreadsheet(ss).onChange().create();
-  ScriptApp.newTrigger('nightlyCheck').timeBased()
-    .atHour(SETTINGS.NIGHTLY_CHECK_HOUR).everyDays(1).create();
+  // nightlyCheck is intentionally NOT installed as a trigger — see the
+  // comment on that function for why. The real safety net is the
+  // "Assumed [owner] worked alone" flag, reviewed at payroll.
   SpreadsheetApp.getUi().alert(
     'Triggers installed.\n\nTips now recalculate automatically when a form is ' +
     'submitted and when the Square Tips tab is edited.');
