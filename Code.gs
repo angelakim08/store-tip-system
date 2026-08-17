@@ -477,7 +477,7 @@ function readOwnerShifts() {
   var out = {};
   if (!config) return out;
 
-  var rows = config.getRange('A15:D200').getValues();
+  var rows = config.getRange('A17:D200').getValues();
   rows.forEach(function (r, idx) {
     if (!r[0]) return;
     var start = parseMinutes(r[1]);
@@ -495,7 +495,7 @@ function readOwnerShifts() {
       endMinutes: end,
       takingCents: takingCents,
       notes: '',
-      row: 15 + idx  // Config row, for anything that needs to point back to it
+      row: 17 + idx  // Config row, for anything that needs to point back to it
     });
   });
   return out;
