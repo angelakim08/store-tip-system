@@ -28,15 +28,17 @@ var SETTINGS = {
   // Hour (24h, shop local) for the nightly "did anyone log their shift?" check.
   NIGHTLY_CHECK_HOUR: 22,
 
-  // 0 = Sunday. Days the shop is closed, so the nightly check stays quiet.
-  CLOSED_DAYS: [],
-
   // Sanity bounds for a shift. Set these to the shop's real hours with about
   // an hour of slack either side — the tighter they are, the more AM/PM slips
   // get caught. Any flip within these hours still surfaces as unassigned tips.
-  EARLIEST_START: 10 * 60,   // 10:00 AM — set to opening time minus ~1hr
-  LATEST_END: 22 * 60,       // 10:00 PM — set to closing time plus ~1hr
+  // Shop hours: Tue-Thu 12-9, Fri-Sun 11-9, closed Monday.
+  EARLIEST_START: 10 * 60,   // 10:00 AM — 1hr before the earliest opening (11 AM Fri-Sun)
+  LATEST_END: 22 * 60,       // 10:00 PM — 1hr after closing (9 PM every open day)
   MAX_SHIFT_MINUTES: 12 * 60,
+
+  // 0 = Sunday. Closed Monday, so the nightly "did anyone log?" check stays
+  // quiet rather than nagging about a day the shop was never open.
+  CLOSED_DAYS: [1],
 
   TZ: 'America/Los_Angeles'
 };
@@ -240,6 +242,39 @@ function findDuplicatePeople(shifts) {
   return dupes;
 }
 
+/**
+ * Apply a voluntary reduction (the owner taking less than his computed
+ * share). The freed amount is redistributed across everyone else in that
+ * day's totals so the day still reconciles to what Square collected.
+ * Mirrors splitLogic.js — keep both in sync.
+ */
+function applyOverrides(totals, overrides, rotation) {
+  if (!overrides || Object.keys(overrides).length === 0) return totals;
+
+  var result = {};
+  for (var k in totals) result[k] = totals[k];
+
+  var freed = 0, recipients = [];
+  for (var name in result) {
+    if (overrides.hasOwnProperty(name)) {
+      if (overrides[name] > result[name]) {
+        throw new Error(name + ': an override can only lower a share, never raise it.');
+      }
+      freed += result[name] - overrides[name];
+      result[name] = overrides[name];
+    } else {
+      recipients.push(name);
+    }
+  }
+
+  if (freed > 0) {
+    if (recipients.length === 0) throw new Error('Everyone overrode — freed money has nowhere to go.');
+    var extra = splitPool(freed, recipients, rotation);
+    for (var r in extra) result[r] += extra[r];
+  }
+  return result;
+}
+
 function computeDay(shifts, tips, rotation) {
   var stretches = buildStretches(shifts);
   var assigned = assignTips(stretches, tips);
@@ -356,6 +391,7 @@ function readShiftLog() {
       person: person,
       startMinutes: start,
       endMinutes: end,
+      takingCents: null,   // staff shifts never carry a reduction
       notes: cols.notes === -1 ? '' : (r[cols.notes] || ''),
       row: i + 1
     });
@@ -425,6 +461,47 @@ function readSquareTips() {
 }
 
 /**
+ * The owner's own shifts, entered directly by the manager — never through
+ * the Form. He typically works alone in the morning, so there is no
+ * handoff moment where a closer could log this for him; a small table she
+ * fills in herself is simpler than routing it through the staff form.
+ *
+ * Config, starting at row 40:  Date | Started | Ended | Keeping
+ * 'Keeping' blank means his full share, same as anyone else.
+ */
+function readOwnerShifts() {
+  var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
+  var ownerName = (config && config.getRange('B4').getValue()) || 'Ali';
+  ownerName = String(ownerName).trim() || 'Ali';
+
+  var out = {};
+  if (!config) return out;
+
+  var rows = config.getRange('A15:D200').getValues();
+  rows.forEach(function (r, idx) {
+    if (!r[0]) return;
+    var start = parseMinutes(r[1]);
+    var end = parseMinutes(r[2]);
+    if (start === null || end === null) return;
+    if (end <= start) end += 24 * 60;
+
+    var takingCents = (r[3] === '' || r[3] === null) ? null : toCents(r[3]);
+
+    var day = normalizeDate(r[0]);
+    if (!out[day]) out[day] = [];
+    out[day].push({
+      person: ownerName,
+      startMinutes: start,
+      endMinutes: end,
+      takingCents: takingCents,
+      notes: '',
+      row: 15 + idx  // Config row, for anything that needs to point back to it
+    });
+  });
+  return out;
+}
+
+/**
  * Roster and payout channel, from the Config tab starting at row 6:
  *   A: Name (spelled exactly as in ADP)   B: 'ADP' or 'Cash'
  *
@@ -452,6 +529,12 @@ function readRoster() {
 // ---------------------------------------------------------------------------
 function recalculate() {
   var shiftsByDay = readShiftLog();
+  var ownerShiftsByDay = readOwnerShifts();
+  Object.keys(ownerShiftsByDay).forEach(function (day) {
+    if (!shiftsByDay[day]) shiftsByDay[day] = [];
+    shiftsByDay[day] = shiftsByDay[day].concat(ownerShiftsByDay[day]);
+  });
+
   var tipsByDay = readSquareTips();
   var roster = readRoster();
   var unknownNames = {};
@@ -499,9 +582,34 @@ function recalculate() {
     // A nameless entry cannot be split, so stop here for this day.
     if (shifts.some(function (s) { return !s.person; })) return;
 
+    var overrides = {};
+    shifts.forEach(function (s) {
+      if (s.takingCents !== null && s.takingCents !== undefined) {
+        overrides[s.person] = s.takingCents;
+      }
+    });
+
+    // Someone mentioned "keeping" in a note but no number could be read from
+    // it — likely a typo like "keeping ten" instead of "keeping $10". Flag it
+    // rather than silently treating the day as a normal full share.
+    shifts.forEach(function (s) {
+      if (s.notes && /\b(?:keep(?:ing|s)?|kept)\b/i.test(s.notes) && s.takingCents === null) {
+        flags.push([friendlyDate(day), 'Could not read the amount ' + s.person + ' is keeping',
+          'The note says "' + s.notes + '" but no dollar amount could be found in it. ' +
+          'Edit the note to something like "keeping $10" and recalculate.']);
+      }
+    });
+
     var result;
     try {
       result = computeDay(shifts, tips, rotation);
+      if (Object.keys(overrides).length) {
+        try {
+          result.totals = applyOverrides(result.totals, overrides, rotation);
+        } catch (ovErr) {
+          flags.push([friendlyDate(day), 'Problem with the reduced-tip amount', ovErr.message]);
+        }
+      }
     } catch (err) {
       flags.push([friendlyDate(day), 'Something is wrong with this day', err.message]);
       return;
@@ -579,6 +687,41 @@ function checkPlausibility(day, shifts) {
   });
 
   return out;
+}
+
+/**
+ * A quick check the manager runs right before payroll — not the owner.
+ * Lists every shift entry for whichever name is treated as the owner
+ * (Config!B4, or 'Ali' if blank) so she can confirm at a glance that any
+ * reduced-tip notes were read correctly before he ever sees the output.
+ */
+function ownerPrecheck() {
+  var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
+  var ownerName = (config && config.getRange('B4').getValue()) || 'Ali';
+  ownerName = String(ownerName).trim() || 'Ali';
+
+  var byDay = readOwnerShifts();
+  var rows = [];
+
+  Object.keys(byDay).sort().forEach(function (day) {
+    byDay[day].forEach(function (s) {
+      var status = s.takingCents !== null
+        ? 'Keeping ' + toDollars(s.takingCents).toFixed(2)
+        : 'Full share';
+      rows.push([friendlyDate(day), minutesToClock(s.startMinutes),
+                 minutesToClock(s.endMinutes % (24 * 60)), status]);
+    });
+  });
+
+  writeTab('Owner Pre-Payroll Check',
+    ['Date', 'Start', 'End', 'What he is getting'], rows);
+
+  SpreadsheetApp.getUi().alert(
+    rows.length
+      ? 'Found ' + rows.length + ' entr' + (rows.length === 1 ? 'y' : 'ies') +
+        ' for "' + ownerName + '" in Config. Check the "Owner Pre-Payroll Check" ' +
+        'tab before running Recalculate for payroll.'
+      : 'No entries found for "' + ownerName + '" in Config yet (rows 40+).');
 }
 
 function writeTab(name, headers, rows, moneyCol) {
@@ -792,9 +935,18 @@ function setupSheet() {
     config.getRange('A2').setValue('Pay periods (fixed: 1st-15th, 16th-EOM)');
     config.getRange('B2').setValue('semi-monthly');
     config.getRange('A3').setValue('Alert email');
+    config.getRange('A4').setValue('Owner\'s name (as typed on the form)');
+    config.getRange('B4').setValue('Ali');
 
     config.getRange('A5').setValue('Name (spelled exactly as in ADP)').setFontWeight('bold');
     config.getRange('B5').setValue('Paid via').setFontWeight('bold');
+
+    config.getRange('A13').setValue(
+      'Owner\'s own shifts — enter directly, he does not use the staff form.')
+      .setFontWeight('bold');
+    config.getRange('A14:D14')
+      .setValues([['Date', 'Started', 'Ended', 'Keeping (blank = full share)']])
+      .setFontWeight('bold');
 
     // Drop-down so nobody types 'cash ' or 'adp.' and breaks the match.
     var rule = SpreadsheetApp.newDataValidation()
@@ -852,6 +1004,7 @@ function onOpen() {
     .addItem('2. Install triggers', 'setupTriggers')
     .addSeparator()
     .addItem('Recalculate now', 'recalculate')
+    .addItem('Check owner\'s reduced-tip entries', 'ownerPrecheck')
     .addSeparator()
     .addItem('Diagnose (why is a day not splitting?)', 'diagnose')
     .addToUi();
