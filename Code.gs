@@ -461,13 +461,29 @@ function readSquareTips() {
 }
 
 /**
+ * Find the owner-shift table by its own header row ("Date | Started | Ended
+ * | Keeping") rather than a fixed row number. A hardcoded row breaks the
+ * moment the roster grows past it or someone inserts a row above it —
+ * searching for the header survives both.
+ */
+function findOwnerTableStart(config) {
+  var values = config.getDataRange().getValues();
+  for (var i = 0; i < values.length; i++) {
+    var a = String(values[i][0] || '').trim().toLowerCase();
+    var b = String(values[i][1] || '').trim().toLowerCase();
+    if (a === 'date' && b === 'started') return i + 2; // 1-indexed, data starts next row
+  }
+  return null; // header not found — caller decides how to handle this
+}
+
+/**
  * The owner's own shifts, entered directly by the manager — never through
  * the Form. He typically works alone in the morning, so there is no
  * handoff moment where a closer could log this for him; a small table she
  * fills in herself is simpler than routing it through the staff form.
  *
- * Config, starting at row 40:  Date | Started | Ended | Keeping
- * 'Keeping' blank means his full share, same as anyone else.
+ * Located by its own header row, so it survives the roster growing or the
+ * table being moved. See findOwnerTableStart.
  */
 function readOwnerShifts() {
   var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
@@ -477,7 +493,13 @@ function readOwnerShifts() {
   var out = {};
   if (!config) return out;
 
-  var rows = config.getRange('A17:D200').getValues();
+  var startRow = findOwnerTableStart(config);
+  if (startRow === null) return out; // table not found; recalculate() will flag this
+
+  var lastRow = config.getLastRow();
+  if (lastRow < startRow) return out;
+
+  var rows = config.getRange(startRow, 1, lastRow - startRow + 1, 4).getValues();
   rows.forEach(function (r, idx) {
     if (!r[0]) return;
     var start = parseMinutes(r[1]);
@@ -495,7 +517,7 @@ function readOwnerShifts() {
       endMinutes: end,
       takingCents: takingCents,
       notes: '',
-      row: 17 + idx  // Config row, for anything that needs to point back to it
+      row: startRow + idx  // real Config row, wherever the table actually is
     });
   });
   return out;
@@ -530,6 +552,21 @@ function readRoster() {
 function recalculate() {
   var shiftsByDay = readShiftLog();
   var ownerShiftsByDay = readOwnerShifts();
+  var flags = [];
+
+  var configSheetForCheck = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
+  if (configSheetForCheck && findOwnerTableStart(configSheetForCheck) === null) {
+    // Doesn't block the run — staff shifts are unaffected either way — but
+    // it means the owner's own shift table can't be found, so any entries
+    // in it are silently not being read. Worth surfacing rather than left
+    // as a quiet gap someone only discovers on payday.
+    flags.push(['—', 'Owner\'s shift table not found',
+      'Could not find a row in Config with "Date" in column A and "Started" in ' +
+      'column B. If that header row was moved, renamed, or deleted, ' +
+      '"' + ((configSheetForCheck.getRange('B4').getValue()) || 'the owner') +
+      '"\'s own shifts are not being read. Restore the header row exactly as ' +
+      '"Date | Started | Ended | Keeping" and recalculate.']);
+  }
   Object.keys(ownerShiftsByDay).forEach(function (day) {
     if (!shiftsByDay[day]) shiftsByDay[day] = [];
     shiftsByDay[day] = shiftsByDay[day].concat(ownerShiftsByDay[day]);
@@ -539,7 +576,6 @@ function recalculate() {
   var roster = readRoster();
   var unknownNames = {};
 
-  var flags = [];
   var dailyRows = [];
 
   var allDays = {};
