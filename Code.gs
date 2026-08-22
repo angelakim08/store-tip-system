@@ -12,7 +12,7 @@
  * TABS
  *   Form Responses 1   shift log, written by the Google Form — never hand-edit
  *   Square Tips        pasted from the Square export: Date | Time | Tip
- *   Config             roster, pay period anchor, alert email
+ *   Config             roster, pay period anchor, alert email, owner's own shifts
  *   Daily Splits       generated
  *   Payroll Summary    generated — what the owner opens on payday
  *   Flags              generated — anything needing a human
@@ -22,24 +22,12 @@
  */
 
 var SETTINGS = {
-  // Orphan pennies rotate by day so the same person isn't always up a cent.
   ROTATE_PENNIES: true,
-
-  // Hour (24h, shop local) for the nightly "did anyone log their shift?" check.
   NIGHTLY_CHECK_HOUR: 22,
-
-  // Sanity bounds for a shift. Set these to the shop's real hours with about
-  // an hour of slack either side — the tighter they are, the more AM/PM slips
-  // get caught. Any flip within these hours still surfaces as unassigned tips.
-  // Shop hours: Tue-Thu 12-9, Fri-Sun 11-9, closed Monday.
-  EARLIEST_START: 10 * 60,   // 10:00 AM — 1hr before the earliest opening (11 AM Fri-Sun)
-  LATEST_END: 22 * 60,       // 10:00 PM — 1hr after closing (9 PM every open day)
+  EARLIEST_START: 10 * 60,
+  LATEST_END: 22 * 60,
   MAX_SHIFT_MINUTES: 12 * 60,
-
-  // 0 = Sunday. Closed Monday, so the nightly "did anyone log?" check stays
-  // quiet rather than nagging about a day the shop was never open.
   CLOSED_DAYS: [1],
-
   TZ: 'America/Los_Angeles'
 };
 
@@ -115,11 +103,9 @@ function normalizeDate(value) {
   var s = String(value).trim();
   if (!s) return '';
 
-  // Already yyyy-mm-dd (possibly with a time appended)
   var iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
   if (iso) return iso[1] + '-' + pad(parseInt(iso[2], 10)) + '-' + pad(parseInt(iso[3], 10));
 
-  // m/d/yyyy or mm/dd/yyyy
   var us = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
   if (us) return us[3] + '-' + pad(parseInt(us[1], 10)) + '-' + pad(parseInt(us[2], 10));
 
@@ -151,6 +137,17 @@ function friendlyPeriod(label) {
 function minutesToClock(m) {
   var h = Math.floor(m / 60), mm = m % 60;
   return (h % 12 === 0 ? 12 : h % 12) + ':' + (mm < 10 ? '0' : '') + mm + (h < 12 ? 'am' : 'pm');
+}
+
+/**
+ * Where a flag should say a bad entry lives, given which sheet it came from.
+ * Staff shifts point back to Form Responses; the owner's own shifts point
+ * back to Config. Getting this wrong is confusing in a very specific way —
+ * it sends someone looking for a row number in the wrong tab entirely.
+ */
+function sourceLabel(source, row) {
+  if (source === 'config') return 'Config, row ' + row + ' (the owner\'s own shift table)';
+  return 'row ' + row + ' of the form responses';
 }
 
 // ---------------------------------------------------------------------------
@@ -225,8 +222,6 @@ function buildStretches(shifts) {
         people.push(s.person);
       }
     });
-    // A window nobody covered is a real gap. Dropping it means tips inside
-    // come back unassigned and get flagged, not handed to whoever was nearby.
     if (people.length) stretches.push({ startMinutes: from, endMinutes: to, people: people });
   }
   return stretches;
@@ -307,8 +302,6 @@ function findResponseSheet() {
     if (/^form[\s_-]*response/i.test(sheets[i].getName())) return sheets[i];
   }
 
-  // Last resort: any tab whose first cell is 'Timestamp' — the Form always
-  // writes that header, whatever the tab ends up being called.
   for (var j = 0; j < sheets.length; j++) {
     if (String(sheets[j].getRange('A1').getValue()).trim().toLowerCase() === 'timestamp') {
       return sheets[j];
@@ -379,8 +372,6 @@ function readShiftLog() {
     var end = parseMinutes(r[cols.end]);
     if (start === null || end === null) continue;
 
-    // A stretch ending before it starts crossed midnight. Extend past 24h so
-    // the window still contains late tips rather than silently matching none.
     if (end <= start) end += 24 * 60;
 
     var person = String(r[cols.who] || '').trim();
@@ -391,9 +382,10 @@ function readShiftLog() {
       person: person,
       startMinutes: start,
       endMinutes: end,
-      takingCents: null,   // staff shifts never carry a reduction
+      takingCents: null,
       notes: cols.notes === -1 ? '' : (r[cols.notes] || ''),
-      row: i + 1
+      row: i + 1,
+      source: 'form'
     });
   }
   return byDay;
@@ -419,8 +411,6 @@ function mapTipColumns(headerRow) {
   var cols = {
     date: find(function (h) { return h === 'date'; }),
     time: find(function (h) { return h === 'time'; }),
-    // 'tip' exactly — never 'tips', 'tip percentage', or a column that merely
-    // contains the word, or we would silently total the wrong money.
     tip:  find(function (h) { return h === 'tip'; })
   };
 
@@ -471,9 +461,9 @@ function findOwnerTableStart(config) {
   for (var i = 0; i < values.length; i++) {
     var a = String(values[i][0] || '').trim().toLowerCase();
     var b = String(values[i][1] || '').trim().toLowerCase();
-    if (a === 'date' && b === 'started') return i + 2; // 1-indexed, data starts next row
+    if (a === 'date' && b === 'started') return i + 2;
   }
-  return null; // header not found — caller decides how to handle this
+  return null;
 }
 
 /**
@@ -494,7 +484,7 @@ function readOwnerShifts() {
   if (!config) return out;
 
   var startRow = findOwnerTableStart(config);
-  if (startRow === null) return out; // table not found; recalculate() will flag this
+  if (startRow === null) return out;
 
   var lastRow = config.getLastRow();
   if (lastRow < startRow) return out;
@@ -517,7 +507,8 @@ function readOwnerShifts() {
       endMinutes: end,
       takingCents: takingCents,
       notes: '',
-      row: startRow + idx  // real Config row, wherever the table actually is
+      row: startRow + idx,
+      source: 'config'
     });
   });
   return out;
@@ -528,8 +519,8 @@ function readOwnerShifts() {
  *   A: Name (spelled exactly as in ADP)   B: 'ADP' or 'Cash'
  *
  * Trainees are not on payroll and receive their online tips as cash from the
- * register. Same allocation math, different payout channel. The owner decides who
- * is which; this sheet only records it.
+ * register. Same allocation math, different payout channel. The owner decides
+ * who is which; this sheet only records it.
  */
 function readRoster() {
   var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
@@ -561,10 +552,6 @@ function recalculate() {
     if (rawOwnerName) ownerName = rawOwnerName;
 
     if (findOwnerTableStart(configSheetForCheck) === null) {
-      // Doesn't block the run — staff shifts are unaffected either way — but
-      // it means the owner's own shift table can't be found, so any entries
-      // in it are silently not being read. Worth surfacing rather than left
-      // as a quiet gap someone only discovers on payday.
       flags.push(['—', 'Owner\'s shift table not found',
         'Could not find a row in Config with "Date" in column A and "Started" in ' +
         'column B. If that header row was moved, renamed, or deleted, ' +
@@ -593,9 +580,6 @@ function recalculate() {
     var tips = tipsByDay[day] || [];
     var rotation = SETTINGS.ROTATE_PENNIES ? dayOfYear(day) : 0;
 
-    // Check the shift entries themselves before deciding whether there is
-    // anything to split. A bad time typed today should surface today, not sit
-    // invisible until the export is pasted at payroll.
     checkPlausibility(day, shifts).forEach(function (f) { flags.push(f); });
 
     findDuplicatePeople(shifts).forEach(function (name) {
@@ -607,19 +591,13 @@ function recalculate() {
     var noName = shifts.filter(function (s) { return !s.person; });
     if (noName.length) {
       flags.push([friendlyDate(day), 'Someone left their name blank',
-        'Row ' + noName[0].row + ' of the form responses has no name. Ask whose shift ' +
-        'it was and type it in, spelled the same as in Config.']);
+        'An entry at ' + sourceLabel(noName[0].source, noName[0].row) + ' has no name. ' +
+        'Ask whose shift it was and type it in, spelled the same as in Config.']);
     }
 
-    if (tips.length === 0) return; // no online tips yet, nothing to split
+    if (tips.length === 0) return;
 
     if (shifts.length === 0) {
-      // Nobody logged anything, but tips came in. Now that Ali often works
-      // solo and never touches the form on a normal day, this is his most
-      // common day — not a mistake. Assume it was him, alone, all day, and
-      // let the totals flow. Flag it as informational so the manager can
-      // scan and correct the rare day this assumption is actually wrong
-      // (e.g. someone else worked and genuinely forgot to log).
       var assumedTotal = tips.reduce(function (s, t) { return s + t.cents; }, 0);
 
       dailyRows.push([day, ownerName, toDollars(assumedTotal)]);
@@ -630,7 +608,6 @@ function recalculate() {
       return;
     }
 
-    // A nameless entry cannot be split, so stop here for this day.
     if (shifts.some(function (s) { return !s.person; })) return;
 
     var overrides = {};
@@ -640,9 +617,6 @@ function recalculate() {
       }
     });
 
-    // Someone mentioned "keeping" in a note but no number could be read from
-    // it — likely a typo like "keeping ten" instead of "keeping $10". Flag it
-    // rather than silently treating the day as a normal full share.
     shifts.forEach(function (s) {
       if (s.notes && /\b(?:keep(?:ing|s)?|kept)\b/i.test(s.notes) && s.takingCents === null) {
         flags.push([friendlyDate(day), 'Could not read the amount ' + s.person + ' is keeping',
@@ -681,8 +655,6 @@ function recalculate() {
     });
   });
 
-  // A name in the shift log that is not on the roster means either a new hire
-  // nobody added, or a spelling that will not match ADP. Both pay someone wrong.
   Object.keys(unknownNames).sort().forEach(function (name) {
     flags.push(['—', '"' + name + '" is not in the Config list',
       'They filled in the form but are not on the roster, so the sheet does not know ' +
@@ -690,7 +662,6 @@ function recalculate() {
       'same way, and choose ADP or Cash.']);
   });
 
-  // slice() first — reverse() mutates, and dailyRows is passed on below.
   writeTab(TAB.DAILY, ['Date', 'Employee', 'Online Tips'],
     dailyRows.slice().reverse().map(function (r) {
       return [friendlyDate(r[0]), r[1], r[2]];
@@ -705,35 +676,41 @@ function recalculate() {
 /**
  * Catch shift times nobody actually worked.
  *
- * The dropdown on the form makes AM/PM mistakes nearly impossible, but this
- * is the backstop for anything that slips through — a 5:30 AM start, or a
- * shift that runs fifteen hours because someone picked AM for the end time.
+ * The dropdown on the form makes AM/PM mistakes nearly impossible on staff
+ * entries, but the owner's own table is hand-typed by the manager, and
+ * Sheets silently guesses AM when a time like '5:30' is typed without a
+ * suffix — this is the backstop for exactly that.
  *
- * These do not stop the calculation. They ask a human to look.
+ * These do not stop the calculation. They ask a human to look. The location
+ * named in the message depends on where the shift actually came from — the
+ * Form or the owner's Config table — so the row number always points
+ * somewhere real. See sourceLabel.
  */
 function checkPlausibility(day, shifts) {
   var out = [];
 
   shifts.forEach(function (s) {
     var duration = s.endMinutes - s.startMinutes;
+    var where = sourceLabel(s.source, s.row);
 
     if (duration > SETTINGS.MAX_SHIFT_MINUTES) {
       out.push([friendlyDate(day), (s.person || 'Someone') + ' has a very long shift',
         minutesToClock(s.startMinutes) + ' to ' + minutesToClock(s.endMinutes % (24 * 60)) +
         ' is ' + (duration / 60).toFixed(1) + ' hours. This is almost always an AM/PM ' +
-        'mix-up on the end time. Row ' + s.row + ' of the form responses.']);
+        'mix-up on the end time — type "5:30 PM" rather than just "5:30" so Sheets ' +
+        'cannot guess wrong. See ' + where + '.']);
     }
 
     if (s.startMinutes < SETTINGS.EARLIEST_START) {
       out.push([friendlyDate(day), (s.person || 'Someone') + ' started before the shop opens',
-        'The form says ' + minutesToClock(s.startMinutes) + '. Check the AM/PM on the ' +
-        'start time. Row ' + s.row + ' of the form responses.']);
+        'The entry says ' + minutesToClock(s.startMinutes) + '. Check the AM/PM on the ' +
+        'start time. See ' + where + '.']);
     }
 
     if (s.endMinutes > SETTINGS.LATEST_END && duration <= SETTINGS.MAX_SHIFT_MINUTES) {
       out.push([friendlyDate(day), (s.person || 'Someone') + ' finished after the shop closes',
-        'The form says ' + minutesToClock(s.endMinutes % (24 * 60)) + '. Check the AM/PM ' +
-        'on the end time. Row ' + s.row + ' of the form responses.']);
+        'The entry says ' + minutesToClock(s.endMinutes % (24 * 60)) + '. Check the AM/PM ' +
+        'on the end time. See ' + where + '.']);
     }
   });
 
@@ -744,7 +721,7 @@ function checkPlausibility(day, shifts) {
  * A quick check the manager runs right before payroll — not the owner.
  * Lists every shift entry for whichever name is treated as the owner
  * (Config!B4, or 'Ali' if blank) so she can confirm at a glance that any
- * reduced-tip notes were read correctly before he ever sees the output.
+ * reduced-tip entries were read correctly before he ever sees the output.
  */
 function ownerPrecheck() {
   var config = SpreadsheetApp.getActive().getSheetByName(TAB.CONFIG);
@@ -772,7 +749,7 @@ function ownerPrecheck() {
       ? 'Found ' + rows.length + ' entr' + (rows.length === 1 ? 'y' : 'ies') +
         ' for "' + ownerName + '" in Config. Check the "Owner Pre-Payroll Check" ' +
         'tab before running Recalculate for payroll.'
-      : 'No entries found for "' + ownerName + '" in Config yet (rows 40+).');
+      : 'No entries found for "' + ownerName + '" in Config yet.');
 }
 
 function writeTab(name, headers, rows, moneyCol) {
@@ -782,7 +759,6 @@ function writeTab(name, headers, rows, moneyCol) {
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
   if (rows.length) {
     sheet.getRange(2, 1, rows.length, headers.length).setValues(rows);
-    // Dollars, so '35' reads as '$35.00' rather than looking like a count.
     if (moneyCol) sheet.getRange(2, moneyCol, rows.length, 1).setNumberFormat('$#,##0.00');
   }
   sheet.setFrozenRows(1);
@@ -826,21 +802,14 @@ function buildPayrollSummary(dailyRows, roster) {
   });
 
   var out = [];
-  // Newest period first. The owner opens this on payday and needs the current
-  // period at the top, not buried under a year of settled ones.
   Object.keys(buckets).sort().reverse().forEach(function (label) {
     var names = Object.keys(buckets[label]);
 
-    // The action column is a short answer to one question: does this go into
-    // payroll? Long explanatory text belongs in the guide, not on the page
-    // someone reads at 11pm while keying numbers.
-    // '?' when someone is missing from Config — visible, never guessed as Yes.
     var enterInAdp = function (n) {
       if (!roster || !roster.hasOwnProperty(n)) return '? CHECK CONFIG';
       return roster[n] === 'Cash' ? 'No — you pay directly' : 'Yes';
     };
 
-    // ADP people first so the rows to key in are contiguous.
     names.sort(function (a, b) {
       var ca = enterInAdp(a), cb = enterInAdp(b);
       return ca === cb ? (a < b ? -1 : 1) : (ca < cb ? -1 : 1);
@@ -928,8 +897,8 @@ function onFormSubmit() {
 /**
  * Fires when the sheet is edited by hand — which in practice means someone
  * pasting the export into Square Tips. Without this the owner would have to
- * remember to press a button, and "remember to press a button" is exactly the
- * kind of step that gets skipped.
+ * remember to press a button, and "remember to press a button" is exactly
+ * the kind of step that gets skipped.
  *
  * Guarded to the tips tab so ordinary edits elsewhere don't trigger a rebuild.
  */
@@ -944,12 +913,12 @@ function onSheetChange(e) {
 
 /**
  * Previously emailed nightly if nobody had logged a shift that day. Retired:
- * once Ali began routinely working solo without ever touching the form, an
- * unlogged day became his NORMAL day rather than a mistake, and the nightly
- * check has no way to tell the two apart — it runs before tips exist, so it
- * can't yet know whether the day was really covered. Kept as a callable
- * function in case it's wanted again later (e.g. paired with a real
- * schedule feed), but no trigger calls it automatically anymore.
+ * once the owner began routinely working solo without ever touching the
+ * form, an unlogged day became his NORMAL day rather than a mistake, and
+ * the nightly check has no way to tell the two apart — it runs before tips
+ * exist, so it can't yet know whether the day was really covered. Kept as a
+ * callable function in case it's wanted again later (e.g. paired with a
+ * real schedule feed), but no trigger calls it automatically anymore.
  *
  * The actual safety net moved to recalculate(): an unlogged day WITH tips is
  * now flagged as "Assumed [owner] worked alone" for the manager to review at
@@ -986,8 +955,8 @@ function notify(subject, body) {
 
 /**
  * Build the tabs this script needs, with headers and instructions in place.
- * Safe to run more than once — it never overwrites a tab that already exists,
- * so a second run cannot wipe a roster you have already filled in.
+ * Safe to run more than once — it never overwrites a tab that already
+ * exists, so a second run cannot wipe a roster you have already filled in.
  *
  * Run this once, right after pasting the code.
  */
@@ -1000,23 +969,23 @@ function setupSheet() {
     config.getRange('A1').setValue('Setting').setFontWeight('bold');
     config.getRange('B1').setValue('Value').setFontWeight('bold');
 
-    config.getRange('A2').setValue('Pay periods (fixed: 1st-15th, 16th-EOM)');
+    config.getRange('A2').setValue('Pay periods (fixed: 1st-15th, 16th-EOM — this row is unused, safe to ignore)');
     config.getRange('B2').setValue('semi-monthly');
     config.getRange('A3').setValue('Alert email');
-    config.getRange('A4').setValue('Owner\'s name (as typed on the form)');
+    config.getRange('A4').setValue('Owner\'s name (used to label owner entries and flags)');
     config.getRange('B4').setValue('Ali');
 
     config.getRange('A5').setValue('Name (spelled exactly as in ADP)').setFontWeight('bold');
     config.getRange('B5').setValue('Paid via').setFontWeight('bold');
 
     config.getRange('A13').setValue(
-      'Owner\'s own shifts — enter directly, he does not use the staff form.')
+      'Owner\'s own shifts — enter directly, he does not use the staff form. ' +
+      'Always type times WITH am/pm (e.g. "5:30 PM"), never just "5:30".')
       .setFontWeight('bold');
     config.getRange('A14:D14')
       .setValues([['Date', 'Started', 'Ended', 'Keeping (blank = full share)']])
       .setFontWeight('bold');
 
-    // Drop-down so nobody types 'cash ' or 'adp.' and breaks the match.
     var rule = SpreadsheetApp.newDataValidation()
       .requireValueInList(['ADP', 'Cash'], true)
       .setAllowInvalid(false)
@@ -1059,9 +1028,6 @@ function setupTriggers() {
   var ss = SpreadsheetApp.getActive();
   ScriptApp.newTrigger('onFormSubmit').forSpreadsheet(ss).onFormSubmit().create();
   ScriptApp.newTrigger('onSheetChange').forSpreadsheet(ss).onChange().create();
-  // nightlyCheck is intentionally NOT installed as a trigger — see the
-  // comment on that function for why. The real safety net is the
-  // "Assumed [owner] worked alone" flag, reviewed at payroll.
   SpreadsheetApp.getUi().alert(
     'Triggers installed.\n\nTips now recalculate automatically when a form is ' +
     'submitted and when the Square Tips tab is edited.');
